@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2023"
+  },
+  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["**/node_modules/**"]
+}

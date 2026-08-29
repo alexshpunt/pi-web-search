@@ -1,0 +1,52 @@
+{
+  "name": "pi-web-search",
+  "version": "0.1.8",
+  "description": "Web search tool for Pi",
+  "keywords": [
+    "agent-tool",
+    "pi-package",
+    "web-search"
+  ],
+  "homepage": "https://github.com/alexshpunt/pi-web-search#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexshpunt/pi-web-search.git"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "LICENSE",
+    "!src/**/test",
+    "!src/**/*.test.*"
+  ],
+  "type": "module",
+  "imports": {
+    "#src/*": "./src/*"
+  },
+  "scripts": {
+    "test": "vitest run --exclude test/packaged.integration.test.ts",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "verify:package": "node -e \"if (!process.env.PI_WEB_SEARCH_INSTALLED_EXTENSION) { console.error('PI_WEB_SEARCH_INSTALLED_EXTENSION must point to the exact installed archive entrypoint'); process.exit(1); }\" && pnpm run pack:check && vitest run test/packaged.integration.test.ts",
+    "release:verdaccio": "node scripts/release-verdaccio.mjs",
+    "prepublishOnly": "node scripts/publish-guard.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "pi-coding-agent-test": "^0.1.1",
+    "typebox": "^1.1.38",
+    "typescript": "7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "typebox": "^1.1.38"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
