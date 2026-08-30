@@ -14,6 +14,8 @@ import {
 } from "pi-coding-agent-test";
 import { afterAll, expect, test } from "vitest";
 
+import { expectNativePromptContract } from "./support/native-prompt-contract.js";
+
 const installedExtension = process.env.PI_WEB_SEARCH_INSTALLED_EXTENSION;
 const localPiCommand = path.resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
 if (!installedExtension) {
@@ -33,10 +35,10 @@ type TransportReport = {
   externalCalls: number;
   nativeCompletionCalls: number;
   completionUsedTransport: boolean;
+  nativePrompts: string[];
 };
 
 type SurfaceReport = {
-
   tools: Array<{
     name: string;
     description: string;
@@ -247,18 +249,43 @@ test("the exact installed package runs native OpenRouter acquisition and aggrega
   expect(report.externalCalls).toBe(2);
   expect(report.nativeCompletionCalls).toBe(1);
   expect(report.completionUsedTransport).toBe(true);
+  expect.soft(report.nativePrompts).toHaveLength(report.nativeCompletionCalls);
+  for (const nativePrompt of report.nativePrompts) {
+    expectNativePromptContract(nativePrompt, "Pi Search resolver architecture", true);
+  }
   expect(report.activeModels).toContainEqual({
     provider: "openrouter",
     api: "openai-completions",
     id: "openai/gpt-5.6",
   });
   expect(execution.isError).toBe(false);
-  expect(output).toContain("Native model evidence");
-  expect(output.indexOf("Native model evidence")).toBeLessThan(output.indexOf("External-only result"));
-  expect(output).not.toContain("Weaker duplicate title");
-  expect(output).toContain("External-only result");
-  expect(getToolExecutionDetails(execution)).toMatchObject({
+  expect.soft(output).toBe([
+    "Native model evidence: https://example.com/pi-search-resolvers?utm_source=native",
+    "",
+    "1. Pi Search resolver architecture",
+    "   https://example.com/pi-search-resolvers",
+    "   Excerpt: “One Search tool routes text, semantic, web, language, and structural queries.”",
+    "   Sources: serper/empty, duckduckgo-html/demo",
+    "2. External-only result",
+    "   https://example.com/external-only",
+    "   Excerpt: “A second deterministic external result.”",
+    "   Sources: duckduckgo-html/demo",
+  ].join("\n"));
+  expect.soft(output).not.toMatch(/openrouter|openai\/gpt-5\.6|native\s+search|external\s+results|architecture external/i);
+  expect.soft(getToolExecutionDetails(execution)).toMatchObject({
     native: { status: "success", provider: "openrouter", model: "openai/gpt-5.6" },
+    results: [
+      {
+        title: "Pi Search resolver architecture",
+        url: "https://example.com/pi-search-resolvers",
+        sources: ["serper/empty", "duckduckgo-html/demo"],
+      },
+      {
+        title: "External-only result",
+        url: "https://example.com/external-only",
+        sources: ["duckduckgo-html/demo"],
+      },
+    ],
   });
 }, 30_000);
 

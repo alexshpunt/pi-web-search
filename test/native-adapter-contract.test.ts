@@ -1,6 +1,8 @@
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { expectNativePromptContract } from "./support/native-prompt-contract.js";
+
 type ActiveModel = {
   provider: string;
   api: string;
@@ -415,7 +417,11 @@ describe("native adapter Pi runtime and request contracts", () => {
     expect(runtime.complete).toHaveBeenCalledTimes(1);
     const [sentModel, sentContext, sentOptions] = runtime.complete.mock.calls[0] ?? [];
     expect(sentModel).toBe(supported.model);
-    expect(sentContext).toMatchObject({ messages: expect.any(Array) });
+    expect(sentContext).toMatchObject({
+      messages: [{ role: "user", content: expect.any(String) }],
+    });
+    const sentPrompt = (sentContext as { messages?: Array<{ content?: unknown }> }).messages?.[0]?.content;
+    expectNativePromptContract(sentPrompt, query);
     expect(sentOptions).toMatchObject({
       signal,
       fetch: providerFetch,
@@ -492,9 +498,11 @@ describe("native adapter Pi runtime and request contracts", () => {
         "content-type": "application/json",
       },
     });
-    expect(JSON.parse(String((init as RequestInit | undefined)?.body))).toEqual({
+    const body = JSON.parse(String((init as RequestInit | undefined)?.body)) as Record<string, unknown>;
+    expectNativePromptContract(body.input, query);
+    expect(body).toEqual({
       model: "deepseek-v4-flash",
-      input: query,
+      input: expect.any(String),
       tools: [{ type: "web_search" }],
       tool_choice: "required",
     });
@@ -738,6 +746,8 @@ describe("native adapter Pi runtime and request contracts", () => {
 
     expect(runtime.complete).toHaveBeenCalledOnce();
     expect(runtime.complete.mock.calls[0]?.[0]).toBe(activeModel);
+    const context = runtime.complete.mock.calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
+    expectNativePromptContract(context?.messages?.[0]?.content, query);
     expect(runtime.complete.mock.calls[0]?.[2]).toMatchObject({
       signal,
       fetch: providerFetch,
