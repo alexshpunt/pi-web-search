@@ -138,10 +138,10 @@ describe("real tool/coordinator native capability acquisition", () => {
 
     expect(complete).toHaveBeenCalledOnce();
     expect(result.details).toMatchObject({ native: { status: "success", provider: "openai", model: "gpt-5.4" }, results: [] });
-    expect(result.content[0]?.text).toContain("Native-only evidence from gpt-5.4");
+    expect(result.content[0]?.text).toBe("Native-only evidence from gpt-5.4");
   });
 
-  it("fails clearly with empty providers when the active model is native-search ineligible", async () => {
+  it("returns the detailed no-usable-output result with empty providers and an ineligible active model", async () => {
     const cwd = await workspace({ providers: [] });
     const tool = await captureTool();
     const model: ActiveModel = {
@@ -151,11 +151,20 @@ describe("real tool/coordinator native capability acquisition", () => {
       baseUrl: "https://opencode.ai/api/v1",
     };
 
-    await expect(tool.execute("call", { query: "q" }, new AbortController().signal, vi.fn(), {
+    const result = await tool.execute("call", { query: "q" }, new AbortController().signal, vi.fn(), {
       cwd,
       model,
       modelRegistry: {} as ModelRegistry,
-    })).rejects.toThrow("No eligible web search source is configured.");
+    });
+
+    expect(result.content[0]?.text).toBe(
+      "Web search failed: all eligible sources failed or timed out. All configured search providers failed.",
+    );
+    expect(result.details).toMatchObject({
+      native: { status: "ineligible", provider: "opencode-go", model: "opencode-go-model" },
+      results: [],
+      attempts: [],
+    });
   });
 
   it("acquires the exact active Codex model before its adapter joins the concurrent aggregate", async () => {

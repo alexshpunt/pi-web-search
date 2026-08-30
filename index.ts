@@ -15,7 +15,7 @@ const webSearchSchema = Type.Unsafe<{ query: string; limit?: number }>({
   $defs: { WebSearchQuery: { type: "string", minLength: 1, description: "Plain web search query" } },
 });
 type WebSearchParameters = Static<typeof webSearchSchema>;
-const description = "Search the public web when workspace search cannot answer a question, such as current documentation, library versions, errors, or news. Pass plain unprefixed text in `query`; optional `limit` controls only the ranked external-provider list from 1 to 20. Native model search, when supported, appears first as raw text; eligible configured external sources run together and configuration controls them. Use returned titles, URLs, and snippets as citation sources. Reading a known URL is a separate task handled by an HTTP URL reader when one is installed.";
+const description = "Search the public web when workspace search cannot answer a question, such as current documentation, library versions, errors, or news. Pass plain unprefixed text in `query`; optional `limit` controls only the ranked external-provider list from 1 to 20. When supported, native model search returns a direct self-contained answer first, followed by an independently ranked numbered list from eligible external sources, according to configuration. Either part may be absent; if neither is usable, the tool reports an aggregate failure. Use returned titles, URLs, snippets, and native citations as evidence. Reading a known URL is a separate task handled by an HTTP URL reader when one is installed.";
 /** Registers the standalone web_search tool and its user-invoked doctor command. */
 export default async function registerWebSearch(pi: ExtensionAPI): Promise<void> {
   pi.registerTool({
@@ -33,7 +33,6 @@ export default async function registerWebSearch(pi: ExtensionAPI): Promise<void>
         activeModel: context.model,
         modelRegistry: context.modelRegistry,
       });
-      if (details.attempts?.length === 0 && details.native?.status === "ineligible") throw new Error("No eligible web search source is configured.");
       return { content: [{ type: "text", text: formatSearchText(details) }], details } satisfies { content: [{ type: "text"; text: string }]; details: SearchDetails };
     },
   });

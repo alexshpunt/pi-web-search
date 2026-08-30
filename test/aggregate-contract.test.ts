@@ -150,6 +150,50 @@ describe("aggregate external search contract", () => {
     });
   });
 
+  it("merges external URLs that differ only by an empty trailing slash", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
+      requestUrl(input).includes("serper")
+        ? serper([{ title: "Trailing slash", link: "https://example.com/page/" }])
+        : brave([{ title: "Canonical page", url: "https://example.com/page" }]),
+    ));
+
+    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
+
+    expect(details.results).toHaveLength(1);
+    expect(details.results[0]).toMatchObject({
+      url: "https://example.com/page",
+      sources: ["serper/first", "brave/second"],
+    });
+  });
+
+  it("keeps root URLs and meaningful path/query distinctions while normalizing one trailing slash", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
+      requestUrl(input).includes("serper")
+        ? serper([
+          { title: "Root", link: "https://example.com/" },
+          { title: "Path", link: "https://example.com/a/" },
+          { title: "Query one", link: "https://example.com/a?x=1" },
+        ])
+        : brave([
+          { title: "Root duplicate", url: "https://example.com" },
+          { title: "Path duplicate", url: "https://example.com/a" },
+          { title: "Query two", url: "https://example.com/a?x=2" },
+          { title: "Double slash", url: "https://example.com/a//" },
+        ]),
+    ));
+
+    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
+
+    expect(details.results.map((item) => item.url).sort()).toEqual([
+      "https://example.com/",
+      "https://example.com/a",
+      "https://example.com/a/",
+      "https://example.com/a?x=1",
+      "https://example.com/a?x=2",
+    ]);
+    expect(details.results.find((item) => item.url === "https://example.com/a")?.sources).toEqual(["serper/first", "brave/second"]);
+  });
+
   it("combines normalized positions across sources after agreement ties", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
       requestUrl(input).includes("serper")
@@ -272,7 +316,7 @@ describe("aggregate external search contract", () => {
     // later variants count as extra positional evidence (or weaken its strongest position).
     expect(details.results.slice(0, 2).map((item) => item.url)).toEqual([
       "https://example.com/b",
-      "https://example.com/a?utm_source=serper-0",
+      "https://example.com/a",
     ]);
     expect(details.results[0]?.sources).toEqual(["serper/first", "brave/second"]);
   });
@@ -333,7 +377,7 @@ describe("aggregate external search contract", () => {
     expect(details.truncated).toBe(true);
   });
 
-  it("returns partial results without source failures in normal text and distinguishes empty success", async () => {
+  it("returns partial results but treats completed empty sources as no usable output", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
       requestUrl(input).includes("serper")
         ? new Response("serper private failure", { status: 502 })
@@ -348,9 +392,9 @@ describe("aggregate external search contract", () => {
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
     const empty = await aggregateSearch(aggregateConfig(), { query: "nothing", maxResults: 10 });
-    expect(empty.error).toBeUndefined();
     expect(empty.results).toEqual([]);
-    expect(formatSearchText(empty)).toBe('No web search results found for "nothing".');
+    expect(empty.error).toBe("Web search failed: all eligible sources failed or timed out. All configured search providers failed.");
+    expect(formatSearchText(empty)).toBe(empty.error);
   });
 
   it("returns one aggregate failure without leaking individual failures", async () => {
@@ -372,25 +416,28 @@ describe("aggregate external search contract", () => {
 });
 
 describe("raw native-first aggregate contract", () => {
-  it("runs an eligible active model concurrently, labels raw native text first, suppresses its links, and records diagnostics", async () => {
+  it("keeps native prose unchanged while independently merging and ranking external URLs", async () => {
     const barrier = new StartBarrier(3);
+    const nativeAnswer = "Native evidence: https://example.com/native-shared?utm_source=model";
     const runtime = nativeRuntime({
       search: async ({ signal }) => {
         await barrier.arrive("native");
         signal.throwIfAborted();
-        return {
-          provider: "openai",
-          model: "gpt-5",
-          text: "Native evidence: https://example.com/native-shared?utm_source=model",
-        };
+        return { provider: "openai", model: "gpt-5", text: nativeAnswer };
       },
     });
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
       const provider = requestUrl(input).includes("serper") ? "serper" : "brave";
       await barrier.arrive(provider);
       return provider === "serper"
-        ? serper([{ title: "Native duplicate", link: "https://example.com/native-shared?fbclid=x" }])
-        : brave([{ title: "External only", url: "https://example.com/external-only" }]);
+        ? serper([
+          { title: "Strong shared title", link: "https://example.com/native-shared?fbclid=x", snippet: "Shared evidence." },
+          { title: "Serper only", link: "https://example.com/serper-only" },
+        ])
+        : brave([
+          { title: "Weaker shared title", url: "https://example.com/native-shared?gclid=x" },
+          { title: "External only", url: "https://example.com/external-only" },
+        ]);
     }));
 
     const search = aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 }, undefined, runtime);
@@ -401,13 +448,56 @@ describe("raw native-first aggregate contract", () => {
     const output = formatSearchText(details);
 
     expect(beforeRelease).toEqual(["brave", "native", "serper"]);
-    expect(output).toContain("openai");
-    expect(output).toContain("gpt-5");
-    expect(output.indexOf("Native evidence")).toBeLessThan(output.indexOf("External only"));
-    expect(output).not.toContain("Native duplicate");
+    expect(details.answer).toBe(nativeAnswer);
+    expect(details.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: "Strong shared title",
+        url: "https://example.com/native-shared",
+        sources: ["serper/first", "brave/second"],
+      }),
+      expect.objectContaining({ title: "Serper only", sources: ["serper/first"] }),
+      expect.objectContaining({ title: "External only", sources: ["brave/second"] }),
+    ]));
+    expect(details.results.filter((item) => item.url.includes("native-shared"))).toHaveLength(1);
+    expect(output).toBe([
+      nativeAnswer,
+      "",
+      "1. Strong shared title",
+      "   https://example.com/native-shared",
+      "   Excerpt: “Shared evidence.”",
+      "   Sources: serper/first, brave/second",
+      "2. External only",
+      "   https://example.com/external-only",
+      "   Sources: brave/second",
+      "3. Serper only",
+      "   https://example.com/serper-only",
+      "   Sources: serper/first",
+    ].join("\n"));
+    expect(output).not.toMatch(/openai|gpt-5|native\s+search|external\s+results|q external/i);
     expect(details).toMatchObject({
       native: { status: "success", provider: "openai", model: "gpt-5" },
     });
+  });
+
+  it("classifies whitespace-only native prose as unusable without hiding external output", async () => {
+    const runtime = nativeRuntime({
+      search: async () => ({ provider: "openai", model: "gpt-5", text: " \n\t " }),
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
+      requestUrl(input).includes("serper")
+        ? serper([{ title: "External survives", link: "https://example.com/external" }])
+        : brave([]),
+    ));
+
+    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 10 }, undefined, runtime);
+
+    expect(details.answer).toBeUndefined();
+    expect(details.native).toMatchObject({ status: "empty", provider: "openai", model: "gpt-5" });
+    expect(formatSearchText(details)).toBe([
+      "1. External survives",
+      "   https://example.com/external",
+      "   Sources: serper/first",
+    ].join("\n"));
   });
 
   it("does not invoke the native seam when the active model is not eligible", async () => {

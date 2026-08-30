@@ -5,6 +5,19 @@ type ActiveModel = { provider: string; api: string; id: string; baseUrl: string;
 type NativeResult = { text: string; provider: string; model: string };
 type Input = { query: string; model: ActiveModel; modelRegistry: ModelRegistry; signal: AbortSignal; fetch: typeof fetch };
 export interface NativeAdapter { id: string; search(input: Input): Promise<NativeResult>; }
+
+/** Builds the shared direct-answer request sent to every native search provider. */
+export function buildNativeSearchPrompt(query: string): string {
+  return [
+    "Answer immediately with the best self-contained response.",
+    "You may include citations when useful.",
+    "Do not ask follow-up questions or ask for more information.",
+    "Do not describe what you are doing or add meta-commentary.",
+    "Do not add conversational filler.",
+    "Query:",
+    query,
+  ].join("\n");
+}
 export const STATIC_NATIVE_SEARCH_MODEL_IDS: Readonly<Record<string, readonly string[]>> = {
   "openai-responses": ["gpt-5.6","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.5-pro","gpt-5.5-2026-04-23","gpt-5.5-pro-2026-04-23","gpt-5.4","gpt-5.4-pro","gpt-5.4-mini","gpt-5.4-nano","gpt-5.4-2026-03-05","gpt-5.4-pro-2026-03-05","gpt-5.4-mini-2026-03-17","gpt-5.4-nano-2026-03-17","gpt-4.1","gpt-4.1-mini","o4-mini"].map((id) => `openai:openai-responses:${id}`),
   "gemini-google-search": ["gemini-2.5-pro","gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3-flash-preview","gemini-3-pro-image","gemini-3.1-pro-preview","gemini-3.1-flash-image","gemini-3.1-flash-lite","gemini-3.5-flash","gemini-3.5-flash-lite","gemini-3.6-flash","gemini-3.7-flash"].map((id) => `google:google-generative-ai:${id}`),
@@ -29,7 +42,7 @@ function textFromCompletion(result: any): string {
 }
 function completionAdapter(id: string, mutate: (payload: any, model: ActiveModel) => any): NativeAdapter {
   return { id, async search(input) {
-    const result = await (input.modelRegistry as any).complete(input.model, { messages: [{ role: "user", content: input.query }] }, {
+    const result = await (input.modelRegistry as any).complete(input.model, { messages: [{ role: "user", content: buildNativeSearchPrompt(input.query) }] }, {
       signal: input.signal, fetch: input.fetch,
       onPayload: (payload: unknown, model: ActiveModel) => mutate(payload, model),
     });
@@ -63,7 +76,7 @@ async function deepSeekSearch(input: Input): Promise<NativeResult> {
   if (!auth?.ok) throw new Error("Unable to resolve DeepSeek authentication");
   const headers = authHeaders(auth); headers["content-type"] = "application/json";
   const base = metadataBase(input.model, auth); if (!base) throw new Error("Unable to resolve DeepSeek endpoint");
-  const response = await input.fetch(`${base}/responses`, { method: "POST", signal: input.signal, headers, body: JSON.stringify({ model: input.model.id, input: input.query, tools: [{ type: "web_search" }], tool_choice: "required" }) });
+  const response = await input.fetch(`${base}/responses`, { method: "POST", signal: input.signal, headers, body: JSON.stringify({ model: input.model.id, input: buildNativeSearchPrompt(input.query), tools: [{ type: "web_search" }], tool_choice: "required" }) });
   if (!response.ok) throw new Error(`DeepSeek native search failed with HTTP ${response.status}`);
   let body: any; try { body = await response.json(); } catch { throw new Error("DeepSeek native search returned invalid response"); }
   if (!Array.isArray(body?.output)) throw new Error("DeepSeek native search returned malformed response");

@@ -53,12 +53,12 @@ function canonicalize(value: string): string | undefined {
     const url = new URL(value); if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
     url.hash = "";
     for (const name of [...url.searchParams.keys()]) if (/^(?:utm_.+|gclid|fbclid|dclid|msclkid|mc_cid|mc_eid)$/i.test(name)) url.searchParams.delete(name);
+    if (url.pathname.length > 1 && url.pathname.endsWith("/")) url.pathname = url.pathname.slice(0, -1);
     return url.href;
   } catch { return undefined; }
 }
-function nativeLinks(text: string): Set<string> { const set = new Set<string>(); for (const match of text.matchAll(/https?:\/\/[^\s<>"')\]]+/giu)) { const key = canonicalize(match[0].replace(/[.,;:!?]+$/g, "")); if (key) set.add(key); } return set; }
 function statusFor(details: SearchDetails): SearchAttempt["status"] { return details.error ? "failure" : details.results.length ? "success" : "empty"; }
-function rankItems(groups: Array<{ entry: SearchProviderEntry; items: SearchResultItem[] }>, limit: number, suppressed: Set<string>): { results: SearchResultItem[]; truncated: boolean } {
+function rankItems(groups: Array<{ entry: SearchProviderEntry; items: SearchResultItem[] }>, limit: number): { results: SearchResultItem[]; truncated: boolean } {
   type Aggregate = { key: string; variants: Array<{ item: SearchResultItem; position: number; relevance: number; score?: number; source: string }>; sources: Set<string> };
   const map = new Map<string, Aggregate>();
   for (const group of groups) {
@@ -67,7 +67,7 @@ function rankItems(groups: Array<{ entry: SearchProviderEntry; items: SearchResu
     const strongestByPage = new Map<string, { item: SearchResultItem; score?: number; source: string }>();
     for (const item of group.items) {
       const key = canonicalize(item.url);
-      if (!key || suppressed.has(key) || strongestByPage.has(key)) continue;
+      if (!key || strongestByPage.has(key)) continue;
       strongestByPage.set(key, { item, score: item.score, source: label(group.entry) });
     }
     const providerItems = [...strongestByPage.entries()];
@@ -84,7 +84,7 @@ function rankItems(groups: Array<{ entry: SearchProviderEntry; items: SearchResu
   const position = (a: Aggregate) => a.variants.reduce((sum, v) => sum + v.relevance, 0) / a.variants.length;
   const score = (a: Aggregate) => { const values = a.variants.map((v) => v.score).filter((v): v is number => typeof v === "number" && Number.isFinite(v)); return values.length === a.variants.length && values.length > 0 ? values.reduce((x, y) => x + y, 0) / values.length : undefined; };
   all.sort((a, b) => { const scoreA = score(a), scoreB = score(b); const scoreTie = scoreA !== undefined && scoreB !== undefined ? scoreB - scoreA : 0; return b.sources.size - a.sources.size || position(b) - position(a) || scoreTie || a.key.localeCompare(b.key); });
-  const results = all.map((aggregate) => { const strongest = [...aggregate.variants].sort((a, b) => b.relevance - a.relevance)[0]!.item; const sourceNames = [...aggregate.sources]; return { ...strongest, url: strongest.url, sources: sourceNames, source: sourceNames.join(", ") }; });
+  const results = all.map((aggregate) => { const strongest = [...aggregate.variants].sort((a, b) => b.relevance - a.relevance)[0]!.item; const sourceNames = [...aggregate.sources]; return { ...strongest, url: aggregate.key, sources: sourceNames, source: sourceNames.join(", ") }; });
   return { results: results.slice(0, limit), truncated: results.length > limit };
 }
 
@@ -165,8 +165,9 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
     if (outcome.timedOut) { native = { status: "timeout", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted, timeoutReason: "source-timeout" }; return; }
     if (outcome.error) { native = { status: "failure", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted, error: redact(outcome.error instanceof Error ? outcome.error.message : "Native search failed") }; return; }
     const result = outcome.value!;
-    native = { status: result.text ? "success" : "empty", provider: result.provider, model: result.model, durationMs: Date.now() - metadataStarted };
-    (native as NativeDetails & { text?: string }).text = result.text;
+    const usableText = typeof result.text === "string" && result.text.trim().length > 0;
+    native = { status: usableText ? "success" : "empty", provider: result.provider, model: result.model, durationMs: Date.now() - metadataStarted };
+    if (usableText) (native as NativeDetails & { text?: string }).text = result.text;
   })();
 
   let deadlineReached = false;
@@ -195,12 +196,11 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   // Underlying providers are allowed to ignore abort. Their handlers remain attached and cannot alter finalized state.
   if (deadlineReached) for (const state of externalStates) if (!attemptsBy.has(label(state.entry))) attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" });
   const nativeText = (native as NativeDetails & { text?: string }).text;
-  const ranked = rankItems(groups, request.maxResults, nativeText ? nativeLinks(nativeText) : new Set<string>());
+  const ranked = rankItems(groups, request.maxResults);
   const attempts = externalStates.map((state) => attemptsBy.get(label(state.entry))).filter((attempt): attempt is SearchAttempt => Boolean(attempt));
-  const successes = groups.length + (native.status === "success" || native.status === "empty" ? 1 : 0);
   const provider = groups[0]?.entry.provider ?? config.providers[0]?.provider ?? "duckduckgo-html";
   const details: SearchDetails = { provider, query: request.query, results: ranked.results, durationMs: Date.now() - started, truncated: ranked.truncated || attempts.some((attempt) => attempt.resultsCount >= request.maxResults && attempt.status === "success"), attempts, native, strategy: config.strategy, migrationWarnings: config.migrationWarnings, aggregateDeadlineMs, sourceTimeoutMs };
   if (nativeText) (details as any).answer = nativeText;
-  if (successes === 0) details.error = "Web search failed: all eligible sources failed or timed out. All configured search providers failed.";
+  if (!nativeText && ranked.results.length === 0) details.error = "Web search failed: all eligible sources failed or timed out. All configured search providers failed.";
   return details;
 }

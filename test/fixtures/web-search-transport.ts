@@ -25,11 +25,17 @@ type TransportReport = {
     externalCalls: number;
     nativeCompletionCalls: number;
     completionUsedTransport: boolean;
+    nativePrompts: string[];
 };
 
 
 type FixtureModel = { provider: string; api: string; id: string };
-type FixtureContext = { messages: Array<{ role: string }> };
+type FixtureContext = {
+    messages: Array<{
+        role: string;
+        content?: string | Array<{ type?: string; text?: string }>;
+    }>;
+};
 type FixtureOptions = { fetch?: typeof fetch };
 
 function fixtureMessage(model: FixtureModel, content: unknown[], stopReason: "stop" | "toolUse")
@@ -51,6 +57,16 @@ function fixtureMessage(model: FixtureModel, content: unknown[], stopReason: "st
         stopReason,
         timestamp: Date.now(),
     };
+}
+
+function messageText(message: FixtureContext["messages"][number] | undefined): string
+{
+    if (typeof message?.content === "string") return message.content;
+    if (!Array.isArray(message?.content)) return "";
+    return message.content
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("\n");
 }
 
 function fixtureStream(message: ReturnType<typeof fixtureMessage>)
@@ -84,6 +100,7 @@ export default function registerWebSearchDemoTransport(pi: ExtensionAPI): void
         externalCalls: 0,
         nativeCompletionCalls: 0,
         completionUsedTransport: false,
+        nativePrompts: [],
     };
     let abortCurrent: (() => void) | undefined;
     let fallbackAbort: ReturnType<typeof setTimeout> | undefined;
@@ -234,6 +251,8 @@ export default function registerWebSearchDemoTransport(pi: ExtensionAPI): void
                 if (!isFinalAgentTurn)
                 {
                     report.nativeCompletionCalls += 1;
+                    const nativeUserMessage = [...context.messages].reverse().find((message) => message.role === "user");
+                    report.nativePrompts.push(messageText(nativeUserMessage));
                     report.completionUsedTransport = options?.fetch === demoFetch;
                     record("started", "native");
                     return fixtureStream(fixtureMessage(model, [{

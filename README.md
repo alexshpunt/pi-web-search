@@ -22,18 +22,20 @@ The call shape is:
 
 `query` must be a non-empty string. `limit` is optional and must be an integer from 1 to 20. It controls only the appended external result list; it never truncates native model text. Text beginning with `web:` is ordinary query text.
 
-Every ready configured external provider starts concurrently. Native capability lookup also starts without delaying external work. If the active Pi model has a supported native path, its native search joins the same aggregate. The final text contains:
+Every ready configured external provider starts concurrently. Native capability lookup also starts without delaying external work. If the active Pi model has a supported native path, its native search joins the same aggregate. The final text contains the usable parts only:
 
-1. raw native model text, labeled with its provider and model, when native search succeeds;
-2. a globally ranked, canonicalized, and deduplicated external result list with external-provider provenance.
+1. unchanged native model prose first, when native search returns usable text;
+2. one blank line, then a globally ranked, canonicalized, and deduplicated numbered list from external providers, when external results are usable.
 
-Native text is not parsed or ranked as external result items. An external result is omitted when its canonical URL already occurs in the native text. Structured details contain aggregate timing, limits, migration warnings, each external attempt, native identity and status, bounded failure details, timeout reasons, results, and truncation state.
+Either part may appear alone. Public text has no headings or provider/model metadata. Native search is asked for its best immediate, self-contained answer, with useful citations when available and without follow-up questions, requests for more information, process commentary, or conversational filler. Native text is not parsed or ranked as external result items, and an external URL cited by native prose remains in the external list.
+
+Each external snippet is rendered on one line as `Excerpt: “<text>”`. Markdown and HTML structure is removed, whitespace is collapsed, and unsafe terminal and bidirectional presentation controls are neutralized in snippets, titles, displayed URLs, and source labels. The package does not summarize or truncate snippets and does not add ellipses; ellipses already present in provider text remain. Structured details keep the original canonical result data, aggregate timing, limits, migration warnings, each external attempt, native identity and status, bounded failure details, timeout reasons, results, and truncation state.
 
 ## Providers and aggregation
 
 Supported external providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Parallel, Google CSE, Z.AI, OpenAI, Codex, Anthropic, Perplexity, xAI, and Kimi. Every enabled provider with valid settings and available credentials runs. DuckDuckGo HTML remains the zero-configuration default.
 
-External results rank by the number of distinct sources that found the canonical page, then normalized position, optional provider scores when comparable, and canonical URL. Canonicalization removes fragments and the known tracking parameters `utm_*`, `gclid`, `fbclid`, `dclid`, `msclkid`, `mc_cid`, and `mc_eid`. Other query parameters are preserved. Only HTTP and HTTPS results are returned.
+External results rank by the number of distinct sources that found the canonical page, then normalized position, optional provider scores when comparable, and canonical URL. Canonicalization removes fragments, one empty trailing slash from non-root paths, and the known tracking parameters `utm_*`, `gclid`, `fbclid`, `dclid`, `msclkid`, `mc_cid`, and `mc_eid`. Root URLs, meaningful repeated slashes, and other query parameters are preserved. Only HTTP and HTTPS results are returned.
 
 Native search is automatic and may add provider and model charges. There is no per-call cost budget or native enable switch. The configured external-provider set is the external cost control. Current native eligibility is fail-closed:
 
@@ -50,7 +52,7 @@ Provider capability and model availability change. The package fails closed when
 
 The default per-source timeout is 30 seconds. For native search, that single timeout covers capability acquisition and completion together. The default aggregate deadline is 45 seconds and cancels unfinished capability, native, and external work. Caller cancellation takes precedence over partial results and aborts every child operation.
 
-A successful or empty source makes the aggregate operationally successful even when another source fails or times out. Partial failures stay out of normal successful text and remain in structured diagnostics. If every eligible source fails or times out, the caller receives one aggregate error. If all completed sources succeed but find no matches, the call succeeds with an empty-result message. If neither an external nor native source is eligible, the tool returns a clear configuration error.
+A usable native answer or external result list makes the aggregate operationally successful even when another source fails or times out. Partial failures stay out of normal successful text and remain in structured diagnostics. Empty or whitespace-only source output is omitted. If neither side is usable, including when no source is eligible or all sources return empty, the caller receives exactly `Web search failed: all eligible sources failed or timed out. All configured search providers failed.`
 
 Provider HTTP errors include the status and bounded, redacted detail. A custom external-provider `baseUrl` must use public HTTPS, contain no credentials, and not target localhost or a private address.
 
@@ -87,7 +89,7 @@ Or it can define several external providers:
 }
 ```
 
-Use `{ "providers": [] }` to run native search only. It succeeds only when the active model is eligible; otherwise the tool reports that no eligible source is configured. Set `enabled` to `false` on an external entry to exclude it.
+Use `{ "providers": [] }` to run native search only. It succeeds only when the active model is eligible and returns usable text; otherwise the tool returns the same detailed total-failure text. Set `enabled` to `false` on an external entry to exclude it.
 
 Top-level keys are `maxResults` (1–20), positive finite `sourceTimeoutMs`, positive finite `aggregateDeadlineMs`, and either `providers` or the fields for one provider. Provider fields are:
 
