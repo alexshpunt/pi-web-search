@@ -19,24 +19,27 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, { cwd: repository, stdio: "inherit", ...options });
 }
 
-const packJson = execFileSync("npm", ["pack", "--json", "--ignore-scripts"], {
-  cwd: repository,
-  encoding: "utf8",
-});
-const packed = JSON.parse(packJson);
-const archivePath = path.resolve(repository, packed[0]?.filename ?? "");
-if (!archivePath || !archivePath.endsWith(`${packageJson.name}-${packageJson.version}.tgz`)) {
-  throw new Error("npm pack did not produce the expected versioned archive");
-}
-
-const archive = await readFile(archivePath);
-const sha256 = createHash("sha256").update(archive).digest("hex");
 const releaseRoot = path.join(repository, ".agents", "tmp", `release-${packageJson.version}`);
+const archiveRoot = path.join(repository, ".lpt", "package-archives", `release-${packageJson.version}`);
 const workspace = path.join(releaseRoot, "workspace");
 const home = path.join(releaseRoot, "home");
 const manifestPath = path.join(releaseRoot, "verification.json");
 await rm(releaseRoot, { recursive: true, force: true });
 await mkdir(workspace, { recursive: true });
+await mkdir(archiveRoot, { recursive: true });
+
+const packJson = execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", archiveRoot], {
+  cwd: repository,
+  encoding: "utf8",
+});
+const packed = JSON.parse(packJson);
+const archivePath = path.join(archiveRoot, path.basename(packed[0]?.filename ?? ""));
+if (!archivePath.endsWith(`${packageJson.name}-${packageJson.version}.tgz`)) {
+  throw new Error("npm pack did not produce the expected versioned archive");
+}
+
+const archive = await readFile(archivePath);
+const sha256 = createHash("sha256").update(archive).digest("hex");
 
 const isolatedEnvironment = {
   ...process.env,

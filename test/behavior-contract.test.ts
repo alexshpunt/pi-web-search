@@ -41,7 +41,10 @@ describe("preserved WebSearch behavior", () => {
       strategy: "priority",
     });
     expect(details.durationMs).toBeGreaterThanOrEqual(0);
-    expect(details.attempts).toMatchObject([{ provider: "serper", resultsCount: 1 }]);
+    expect(details.attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: "serper", resultsCount: 1 }),
+      expect.objectContaining({ provider: "brave", resultsCount: 0 }),
+    ]));
   });
 
   it("filters unsafe result URLs and fills first results by unique URL", async () => {

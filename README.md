@@ -4,41 +4,55 @@ A standalone Pi extension that provides one agent tool: `web_search`.
 
 ## Install
 
-ALE-30 verified `pi-web-search@0.1.8` through the local Verdaccio registry. Public npm publication is outside this work and has not been verified.
+The aggregate implementation is `pi-web-search@0.1.0`.
 
 ```bash
-npm_config_registry=http://localhost:4873 pi install -l npm:pi-web-search@0.1.8
+npm_config_registry=http://localhost:4873 pi install -l npm:pi-web-search@0.1.0
 ```
 
 Start Pi after installation. Pi loads the TypeScript package entrypoint in `index.ts`. The extension has no provider SDK or HTTP runtime dependency. Pi and TypeBox are peer dependencies.
 
 ## Agent tool
 
-The exact call shape is:
+The call shape is:
 
 ```json
-{ "query": "Pi Search resolver architecture" }
+{ "query": "Pi Search resolver architecture", "limit": 10 }
 ```
 
-`query` is the only field. It must be a non-empty string. Do not add a selector. There is no per-call `limit`; provider configuration controls the result count. Text beginning with `web:` is passed to the provider as ordinary query text.
+`query` must be a non-empty string. `limit` is optional and must be an integer from 1 to 20. It controls only the appended external result list; it never truncates native model text. Text beginning with `web:` is ordinary query text.
 
-Use the tool for current public information that is not available in the workspace, such as documentation, versions, errors, and news. Results contain titles, HTTP(S) URLs, and optional snippets that can support citations. Reading a known URL is a separate task; use an HTTP URL reader when one is installed.
+Every ready configured external provider starts concurrently. Native capability lookup also starts without delaying external work. If the active Pi model has a supported native path, its native search joins the same aggregate. The final text contains:
 
-The text response starts with the query and provider, followed by numbered titles, URLs, and snippets. Structured details contain the provider, optional provider entry ID, query, results, duration, truncation state, optional routing strategy and attempts, and any answer or error returned by the search path.
+1. raw native model text, labeled with its provider and model, when native search succeeds;
+2. a globally ranked, canonicalized, and deduplicated external result list with external-provider provenance.
 
-## Providers and routing
+Native text is not parsed or ranked as external result items. An external result is omitted when its canonical URL already occurs in the native text. Structured details contain aggregate timing, limits, migration warnings, each external attempt, native identity and status, bounded failure details, timeout reasons, results, and truncation state.
 
-Supported providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Parallel, Google CSE, Z.AI, OpenAI, Codex, Anthropic, Perplexity, xAI, and Kimi.
+## Providers and aggregation
 
-Routing supports:
+Supported external providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Parallel, Google CSE, Z.AI, OpenAI, Codex, Anthropic, Perplexity, xAI, and Kimi. Every enabled provider with valid settings and available credentials runs. DuckDuckGo HTML remains the zero-configuration default.
 
-- `priority`: try providers by `priority`, then configuration order;
-- `round-robin`: rotate providers, using positive `weight` values when present;
-- `fill-first`: start with the provider that has returned the fewest successful results, combine results, remove duplicate URLs, and stop at the configured limit.
+External results rank by the number of distinct sources that found the canonical page, then normalized position, optional provider scores when comparable, and canonical URL. Canonicalization removes fragments and the known tracking parameters `utm_*`, `gclid`, `fbclid`, `dclid`, `msclkid`, `mc_cid`, and `mc_eid`. Other query parameters are preserved. Only HTTP and HTTPS results are returned.
 
-When `fallback` is enabled, another provider can be tried after an error, an empty response, or results with no usable URLs. The default uses priority routing, fallback, DuckDuckGo HTML, and at most 10 results.
+Native search is automatic and may add provider and model charges. There is no per-call cost budget or native enable switch. The configured external-provider set is the external cost control. Current native eligibility is fail-closed:
 
-Only HTTP and HTTPS result URLs are returned. A custom `baseUrl` must use public HTTPS, must not contain credentials, and must not point to localhost or a private address. Provider HTTP errors include the status and at most 500 characters of provider detail. Malformed responses, network errors, and exhausted fallback are reported through the existing text and structured error contract. Cancelling a tool call aborts the active provider request and stops fallback.
+- OpenAI Responses supports `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.5-2026-04-23`, `gpt-5.5-pro-2026-04-23`, `gpt-5.4`, `gpt-5.4-pro`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.4-2026-03-05`, `gpt-5.4-pro-2026-03-05`, `gpt-5.4-mini-2026-03-17`, `gpt-5.4-nano-2026-03-17`, `gpt-4.1`, `gpt-4.1-mini`, and `o4-mini`.
+- Gemini Google Search supports `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-flash-preview`, `gemini-3-pro-image`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.6-flash`, and `gemini-3.7-flash`.
+- DeepSeek Responses supports `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp` through the documented Responses path.
+- Xiaomi MiMo supports `mimo-v2.5` and `mimo-v2.5-pro` through Chat Completions.
+- Direct Anthropic Messages and direct xAI Responses are eligible by provider/API. Provider or model rejection is reported as a native-source failure.
+- Codex is eligible only when its runtime catalog has one exact active-model record with `supports_search_tool: true`.
+- OpenRouter is eligible only when exact active-model endpoint metadata has an array-valued `supported_parameters` containing `tools`.
+- OpenCode Go and Zen gateways are not native-search eligible. An upstream model name or OpenAI-compatible request shape is not treated as proof of hosted search support.
+
+Provider capability and model availability change. The package fails closed when static IDs or dynamic metadata do not prove support and never substitutes another model.
+
+The default per-source timeout is 30 seconds. For native search, that single timeout covers capability acquisition and completion together. The default aggregate deadline is 45 seconds and cancels unfinished capability, native, and external work. Caller cancellation takes precedence over partial results and aborts every child operation.
+
+A successful or empty source makes the aggregate operationally successful even when another source fails or times out. Partial failures stay out of normal successful text and remain in structured diagnostics. If every eligible source fails or times out, the caller receives one aggregate error. If all completed sources succeed but find no matches, the call succeeds with an empty-result message. If neither an external nor native source is eligible, the tool returns a clear configuration error.
+
+Provider HTTP errors include the status and bounded, redacted detail. A custom external-provider `baseUrl` must use public HTTPS, contain no credentials, and not target localhost or a private address.
 
 ## Configuration
 
@@ -48,9 +62,9 @@ The extension checks these files:
 2. `~/.pi/agent/websearch.json`
 3. built-in DuckDuckGo HTML defaults
 
-A project file supplies the active routing configuration when present. Otherwise the global file does. The built-in default is used when neither exists. A present invalid file is an error; it is not silently skipped. Global and project entries can still supply credentials for matching provider IDs or provider names.
+A project file supplies the active configuration when present. Otherwise the global file does. The built-in default is used when neither exists. A present invalid file is an error; it is not silently skipped. Global and project entries can still supply credentials for matching provider IDs or provider names.
 
-A configuration can use one provider at the top level:
+A configuration can use one external provider at the top level:
 
 ```json
 {
@@ -59,36 +73,30 @@ A configuration can use one provider at the top level:
 }
 ```
 
-Or it can define routing across several providers:
+Or it can define several external providers:
 
 ```json
 {
-  "strategy": "priority",
-  "fallback": true,
-  "providerOrder": ["primary", "duckduckgo-html"],
+  "maxResults": 10,
+  "sourceTimeoutMs": 30000,
+  "aggregateDeadlineMs": 45000,
   "providers": [
-    {
-      "id": "primary",
-      "provider": "serper",
-      "priority": 1,
-      "maxResults": 10
-    },
-    {
-      "provider": "duckduckgo-html",
-      "priority": 2,
-      "maxResults": 10
-    }
+    { "id": "primary", "provider": "serper" },
+    { "provider": "duckduckgo-html" }
   ]
 }
 ```
 
-Top-level keys are `strategy`, `fallback`, `providerOrder`, and either `providers` or the fields for one provider. Provider fields are:
+Use `{ "providers": [] }` to run native search only. It succeeds only when the active model is eligible; otherwise the tool reports that no eligible source is configured. Set `enabled` to `false` on an external entry to exclude it.
 
-- `id`, `provider`, `apiKey`, `baseUrl`, `searchEngineId`, and `maxResults`;
+Top-level keys are `maxResults` (1–20), positive finite `sourceTimeoutMs`, positive finite `aggregateDeadlineMs`, and either `providers` or the fields for one provider. Provider fields are:
+
+- `id`, `provider`, `enabled`, `apiKey`, `baseUrl`, `searchEngineId`, and `maxResults`;
 - `model`, `codexMode` (`cached` or `live`), and `searchContextSize` (`low`, `medium`, or `high`);
 - `allowedDomains` or `blockedDomains` (not both);
-- `userLocation` with optional `country`, `region`, `city`, and `timezone`;
-- `priority` and positive `weight` for routing.
+- `userLocation` with optional `country`, `region`, `city`, and `timezone`.
+
+The old top-level `strategy`, `fallback`, and `providerOrder` fields and provider-level `priority` and `weight` fields are accepted only for migration. They do not change source selection, ordering, concurrency, or cost. The doctor command and structured search details warn until they are removed.
 
 Provider-specific fields are sent only where that provider supports them. Google CSE also requires `searchEngineId`. All providers except DuckDuckGo HTML require credentials.
 
@@ -119,13 +127,13 @@ The retained legacy credential form is `PI_AGENT_IDE_SEARCH_<ID>_API_KEY`, where
 
 ## Doctor command
 
-Run `/pi-web-search-doctor` in Pi to check configuration for the active working directory and see provider credential readiness. The command does not search, change configuration, or register another agent tool. It reports:
+Run `/pi-web-search-doctor` in Pi to check external-provider configuration for the active working directory. The command does not search, probe native-model capability, change configuration, or register another agent tool. It reports:
 
-- `PASS` for loaded configuration and ready providers;
-- `WARN` for a missing provider credential;
-- `FAIL` for invalid configuration.
+- `PASS` for loaded configuration and external providers with available credentials;
+- `WARN` for obsolete routing fields or an external provider that is disabled or lacks credentials;
+- `FAIL` for invalid JSON, provider configuration, limits, deadlines, or unsafe endpoints.
 
-The report is redacted. It checks only whether a credential is present and never prints its value.
+The report is redacted. It checks only whether an external credential is present and never prints its value.
 
 ## Public API
 
@@ -144,14 +152,16 @@ pnpm run pack:check
 
 `pnpm test` runs the deterministic standalone suite. `pack:check` checks the archive contents. Tests and fixtures stay outside the published archive.
 
-Installed-package verification is separate and mandatory before release. Point it at the entrypoint installed from the exact archive:
+Installed-package verification is separate and mandatory before release. Keep the archive under `.lpt/package-archives/`, install it into an isolated workspace, then point verification at the installed entrypoint:
 
 ```bash
-PI_WEB_SEARCH_INSTALLED_EXTENSION="$PWD/.agents/tmp/release-0.1.8/workspace/.pi/npm/node_modules/pi-web-search/index.ts" \
+ARCHIVE="$PWD/.lpt/package-archives/release-0.1.0/pi-web-search-0.1.0.tgz"
+# Install $ARCHIVE into the isolated release workspace first.
+PI_WEB_SEARCH_INSTALLED_EXTENSION="$PWD/.agents/tmp/release-0.1.0/workspace/.pi/npm/node_modules/pi-web-search/index.ts" \
   pnpm run verify:package
 ```
 
-`verify:package` fails when the variable is missing. It runs `pack:check` and the real-Pi installed-package scenario.
+`verify:package` fails when the variable is missing. It runs `pack:check` and the real-Pi installed-package scenario. Never store a `.tgz` archive under `.agents/` or leave an active configuration or script pointing there. Pi discovers package archives below `.agents/` during startup, so either case can prevent Pi from starting.
 
 ## Local-registry release
 
@@ -163,4 +173,4 @@ pnpm run release:verdaccio
 
 The command accepts only localhost or `127.0.0.1` registries. `PI_WEB_SEARCH_RELEASE_REGISTRY` overrides the default `http://localhost:4873`. Verdaccio credentials come from `../.local-registry/npmrc` unless `PI_WEB_SEARCH_RELEASE_NPMRC` overrides the path.
 
-Review evidence is retained under `.agents/tmp/release-<version>/`, including the installed entrypoint and verification manifest. Public npm publication is not part of this workflow.
+The release archive is retained under `.lpt/package-archives/release-<version>/`. The isolated install workspace and verification manifest stay under `.agents/tmp/release-<version>/`, but that tree must remain free of `.tgz` files. Public npm publication is not part of this workflow.

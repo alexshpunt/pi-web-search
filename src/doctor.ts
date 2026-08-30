@@ -19,11 +19,14 @@ export async function formatWebSearchDoctorReport(
   }
 
   lines.push(`PASS  Configuration loaded (${loaded.source})`);
+  for (const warning of loaded.config.migrationWarnings ?? []) lines.push(`WARN  ${warning}`);
   for (const provider of loaded.config.providers) {
     const isFree = provider.provider === "duckduckgo-html";
-    const ready = isFree || (typeof provider.apiKey === "string" && provider.apiKey.length > 0);
+    const ready = provider.enabled !== false && (isFree || (typeof provider.apiKey === "string" && provider.apiKey.length > 0));
     lines.push(
-      `${ready ? "PASS" : "WARN"}  ${provider.id ?? provider.provider}: credentials ${ready ? "available" : "missing"}`,
+      ready
+        ? `PASS  ${provider.id ?? provider.provider}: credentials available`
+        : `WARN  Provider ${provider.provider} requires apiKey.`,
     );
   }
   return lines.join("\n");

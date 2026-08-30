@@ -25,8 +25,7 @@ describe("configuration validation and compatibility", () => {
       config: { strategy: "priority", fallback: true, providers: [{ provider: "duckduckgo-html", maxResults: 10 }] },
     });
     expect(validateWebsearchConfig({ strategy: "unknown" as never, fallback: true, providers: [] })).toMatchObject({
-      ok: false,
-      reason: "invalid_config",
+      ok: true,
     });
     expect(validateProviderConfig({ provider: "serper", apiKey: "key", baseUrl: "http://localhost:9999" })).toMatchObject({
       ok: false,
@@ -85,5 +84,120 @@ describe("configuration validation and compatibility", () => {
     expect(await loadWebsearchConfig({ cwd, agentDirectory: agent, env: {} })).toMatchObject({ ok: true, config: { providers: [{ apiKey: "global", maxResults: 9 }] } });
     await rm(path.join(agent, "websearch.json"));
     expect(await loadWebsearchConfig({ cwd, agentDirectory: agent, env: {} })).toMatchObject({ ok: true, config: { providers: [{ provider: "duckduckgo-html", maxResults: 10 }] } });
+  });
+});
+
+
+describe("aggregate configuration contract", () => {
+  it("accepts an explicit empty providers array for native-only configuration", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-websearch-native-only-config-"));
+    directories.push(root);
+    const cwd = path.join(root, "project");
+    await mkdir(path.join(cwd, ".pi"), { recursive: true });
+    await writeFile(path.join(cwd, ".pi", "websearch.json"), JSON.stringify({ providers: [] }));
+
+    expect(await loadWebsearchConfig({ cwd, agentDirectory: path.join(root, "agent"), env: {} })).toMatchObject({
+      ok: true,
+      config: { providers: [] },
+    });
+  });
+
+  it("uses bounded aggregate defaults and warns while ignoring obsolete routing fields", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-websearch-aggregate-config-"));
+    directories.push(root);
+    const cwd = path.join(root, "project");
+    const agent = path.join(root, "agent");
+    await mkdir(path.join(cwd, ".pi"), { recursive: true });
+    await writeFile(
+      path.join(cwd, ".pi", "websearch.json"),
+      JSON.stringify({
+        strategy: "round-robin",
+        fallback: false,
+        providerOrder: ["second", "first"],
+        maxResults: 20,
+        sourceTimeoutMs: 12_000,
+        aggregateDeadlineMs: 18_000,
+        providers: [
+          { id: "first", provider: "serper", apiKey: "key", priority: 9 },
+          { id: "second", provider: "brave", apiKey: "key", weight: 5 },
+        ],
+      }),
+    );
+
+    const loaded = await loadWebsearchConfig({ cwd, agentDirectory: agent, env: {} });
+
+    expect(loaded).toMatchObject({
+      ok: true,
+      config: {
+        maxResults: 20,
+        sourceTimeoutMs: 12_000,
+        aggregateDeadlineMs: 18_000,
+        providers: [
+          { id: "first", provider: "serper" },
+          { id: "second", provider: "brave" },
+        ],
+      },
+    });
+    expect(JSON.stringify(loaded)).toContain("obsolete");
+    expect(JSON.stringify(loaded)).toContain("strategy");
+    expect(JSON.stringify(loaded)).toContain("fallback");
+    expect(JSON.stringify(loaded)).toContain("providerOrder");
+    expect(JSON.stringify(loaded)).toContain("priority");
+    expect(JSON.stringify(loaded)).toContain("weight");
+  });
+
+  it.each([0, 21, -1, 1.5])("rejects an out-of-range global result limit: %s", (maxResults) => {
+    expect(validateWebsearchConfig({
+      strategy: "priority",
+      fallback: true,
+      maxResults,
+      providers: [{ provider: "duckduckgo-html" }],
+    } as never)).toMatchObject({ ok: false, reason: "invalid_config" });
+  });
+
+  it("keeps the zero-configuration aggregate defaults", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "pi-websearch-aggregate-default-"));
+    directories.push(cwd);
+
+    expect(await loadWebsearchConfig({ cwd, agentDirectory: path.join(cwd, "agent"), env: {} })).toMatchObject({
+      ok: true,
+      config: {
+        maxResults: 10,
+        sourceTimeoutMs: 30_000,
+        aggregateDeadlineMs: 45_000,
+        providers: [{ provider: "duckduckgo-html" }],
+      },
+    });
+  });
+
+  it("validates every provider endpoint before accepting missing credentials", () => {
+
+    expect(validateWebsearchConfig({
+      providers: [
+        { provider: "serper" },
+        { provider: "brave", apiKey: "key", baseUrl: "http://localhost:9999" },
+      ],
+    })).toMatchObject({ ok: false, reason: "invalid_config" });
+  });
+
+  it("does not discard unsupported or malformed entries beside a missing-credential provider", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-websearch-parse-integrity-"));
+    directories.push(root);
+    const cwd = path.join(root, "project");
+    await mkdir(path.join(cwd, ".pi"), { recursive: true });
+    await writeFile(path.join(cwd, ".pi", "websearch.json"), JSON.stringify({
+      providers: [
+        { provider: "serper" },
+        { provider: "not-a-provider", apiKey: "ignored" },
+        { provider: "brave", apiKey: "key", baseUrl: "http://localhost:9999" },
+        "malformed-entry",
+      ],
+    }));
+
+    const loaded = await loadWebsearchConfig({ cwd, agentDirectory: path.join(root, "agent"), env: {} });
+
+    expect(loaded).toMatchObject({ ok: false, reason: "invalid_config" });
+    expect(loaded).toMatchObject({ message: expect.stringContaining("providers[1].provider is unsupported") });
+    expect(loaded).toMatchObject({ message: expect.stringContaining("providers[3] must be an object") });
   });
 });
