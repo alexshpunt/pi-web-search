@@ -1,6 +1,6 @@
 {
   "name": "pi-web-search",
-  "version": "0.1.8",
+  "version": "0.1.0",
   "description": "Web search tool for Pi",
   "keywords": [
     "agent-tool",

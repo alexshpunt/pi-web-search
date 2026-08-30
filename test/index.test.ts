@@ -26,7 +26,12 @@ describe("standalone extension boundary", () => {
     expect(tools).toHaveLength(1);
     expect(tools[0]?.name).toBe("web_search");
     expect(tools[0]?.parameters.required).toEqual(["query"]);
-    expect(Object.keys(tools[0]?.parameters.properties ?? {})).toEqual(["query"]);
+    expect(Object.keys(tools[0]?.parameters.properties ?? {})).toEqual(["query", "limit"]);
+    expect(tools[0]?.parameters.properties?.limit).toMatchObject({
+      type: "integer",
+      minimum: 1,
+      maximum: 20,
+    });
     expect(tools[0]?.parameters.additionalProperties).toBe(false);
     expect(tools[0]?.description).toContain("plain unprefixed");
     expect(tools[0]?.description).toContain("configuration");
@@ -47,6 +52,7 @@ describe("standalone extension boundary", () => {
     expect(definition.prepareArguments).toBeUndefined();
     expect(Object.keys((definition.parameters as { properties: object }).properties)).toEqual([
       "query",
+      "limit",
     ]);
   });
 });
