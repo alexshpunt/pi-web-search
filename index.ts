@@ -15,12 +15,17 @@ const webSearchSchema = Type.Unsafe<{ query: string; limit?: number }>({
   $defs: { WebSearchQuery: { type: "string", minLength: 1, description: "Plain web search query" } },
 });
 type WebSearchParameters = Static<typeof webSearchSchema>;
-const description = "Search the public web when workspace search cannot answer a question, such as current documentation, library versions, errors, or news. Pass plain unprefixed text in `query`; optional `limit` controls only the ranked external-provider list from 1 to 20. When supported, native model search returns a direct self-contained answer first, followed by an independently ranked numbered list from eligible external sources, according to configuration. Either part may be absent; if neither is usable, the tool reports an aggregate failure. Use returned titles, URLs, snippets, and native citations as evidence. Reading a known URL is a separate task handled by an HTTP URL reader when one is installed.";
+const description = "Search the public web for information on any topic.";
 /** Registers the standalone web_search tool and its user-invoked doctor command. */
 export default async function registerWebSearch(pi: ExtensionAPI): Promise<void> {
   pi.registerTool({
     name: "web_search", label: "web_search", description,
-    promptSnippet: "Search the public web with a plain query and return citable results",
+    promptSnippet: description,
+    promptGuidelines: [
+      "Use web_search when the user mentions an external dependency, package, extension, product, service, or other external reference to find what they mean and get current information.",
+      "Use web_search to verify external facts and find up-to-date information instead of relying on memory.",
+      "When missing factual information can be found online, search with web_search before asking the user to clarify. Ask only if the search does not resolve the uncertainty or the question is about the user's intent or preferences.",
+    ],
     parameters: webSearchSchema,
     async execute(_toolCallId, parameters: WebSearchParameters, signal, _onUpdate, context) {
       if (parameters.query.trim().length === 0) throw new Error("Web search query must not be empty");

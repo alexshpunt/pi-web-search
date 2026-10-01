@@ -33,14 +33,11 @@ describe("standalone extension boundary", () => {
       maximum: 20,
     });
     expect(tools[0]?.parameters.additionalProperties).toBe(false);
-    expect(tools[0]?.description).toContain("plain unprefixed");
-    expect(tools[0]?.description).toContain("configuration");
-    expect(tools[0]?.description).toContain("citation");
-    expect(tools[0]?.description).toContain("known URL");
+    expect(tools[0]?.description).toBe("Search the public web for information on any topic.");
     expect(commands).toEqual(["pi-web-search-doctor"]);
   });
 
-  it("does not add prompt guidelines or compatibility fields", async () => {
+  it("adds web-first research guidelines without compatibility fields", async () => {
     const tool = vi.fn();
     const pi = {
       registerTool: tool,
@@ -48,7 +45,11 @@ describe("standalone extension boundary", () => {
     } as unknown as Parameters<typeof registerWebSearch>[0];
     await registerWebSearch(pi);
     const definition = tool.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(definition.promptGuidelines).toBeUndefined();
+    expect(definition.promptGuidelines).toEqual([
+      "Use web_search when the user mentions an external dependency, package, extension, product, service, or other external reference to find what they mean and get current information.",
+      "Use web_search to verify external facts and find up-to-date information instead of relying on memory.",
+      "When missing factual information can be found online, search with web_search before asking the user to clarify. Ask only if the search does not resolve the uncertainty or the question is about the user's intent or preferences.",
+    ]);
     expect(definition.prepareArguments).toBeUndefined();
     expect(Object.keys((definition.parameters as { properties: object }).properties)).toEqual([
       "query",

@@ -149,21 +149,22 @@ test("runs the exact installed package in real Pi", async () => {
   const surfaces = JSON.parse(await readFile(surfaceReportPath, "utf8")) as SurfaceReport;
   const packageTools = surfaces.tools.filter((tool) => path.resolve(tool.sourceInfo.path) === path.resolve(installedExtension));
   expect(packageTools.map((tool) => tool.name)).toEqual(["web_search"]);
-  expect(packageTools[0]?.description).toContain("plain unprefixed");
-  expect(packageTools[0]?.description).toContain("eligible");
-  expect(packageTools[0]?.description).toContain("limit");
-  expect(packageTools[0]?.promptGuidelines).toBeUndefined();
+  expect(packageTools[0]?.description).toBe("Search the public web for information on any topic.");
+  expect(packageTools[0]?.promptGuidelines).toHaveLength(3);
   const packageCommands = surfaces.commands.filter((command) => path.resolve(command.sourceInfo.path) === path.resolve(installedExtension));
   expect(packageCommands.map((command) => command.name)).toEqual(["pi-web-search-doctor"]);
 
   const providerPrompt = getProviderSystemPrompt(result);
+  for (const guideline of packageTools[0]?.promptGuidelines ?? []) {
+    expect(providerPrompt).toContain(guideline);
+  }
   const availableTools = providerPrompt.split("Available tools:\n", 2)[1]?.split("\n\nIn addition", 2)[0]?.split("\n") ?? [];
   expect(availableTools).toEqual([
     "- read: Read file contents",
     "- bash: Execute bash commands (ls, grep, find, etc.)",
     "- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
     "- write: Create or overwrite files",
-    "- web_search: Search the public web with a plain query and return citable results",
+    "- web_search: Search the public web for information on any topic.",
   ]);
   expect(providerPrompt).not.toContain("Use `web:<query>`");
 
