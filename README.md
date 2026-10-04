@@ -1,6 +1,6 @@
 # pi-web-search
 
-A standalone Pi extension that provides one agent tool: `web_search`.
+A standalone Pi extension with blocking and background `web_search`, plus `wait_for_web_searches`.
 
 ## Install
 
@@ -10,7 +10,7 @@ The aggregate implementation is `pi-web-search@0.1.0`.
 npm_config_registry=http://localhost:4873 pi install -l npm:pi-web-search@0.1.0
 ```
 
-Start Pi after installation. Pi loads the TypeScript package entrypoint in `index.ts`. The extension has no provider SDK or HTTP runtime dependency. Pi and TypeBox are peer dependencies.
+Start Pi after installation. Pi loads the TypeScript package entrypoint in `index.ts`. The extension has no provider SDK or HTTP runtime dependency. Pi, Pi TUI, and TypeBox are peer dependencies. Background delivery uses Pi 1.0.2's actionable turn boundaries.
 
 ## Agent tool
 
@@ -30,6 +30,22 @@ Every ready configured external provider starts concurrently. Native capability 
 Either part may appear alone. Public text has no headings or provider/model metadata. Native search is asked for its best immediate, self-contained answer, with useful citations when available and without follow-up questions, requests for more information, process commentary, or conversational filler. Native text is not parsed or ranked as external result items, and an external URL cited by native prose remains in the external list.
 
 Each external snippet is rendered on one line as `Excerpt: “<text>”`. Markdown and HTML structure is removed, whitespace is collapsed, and unsafe terminal and bidirectional presentation controls are neutralized in snippets, titles, displayed URLs, and source labels. The package does not summarize or truncate snippets and does not add ellipses; ellipses already present in provider text remain. Structured details keep the original canonical result data, aggregate timing, limits, migration warnings, each external attempt, native identity and status, bounded failure details, timeout reasons, results, and truncation state.
+
+## Background searches
+
+`web_search` blocks by default. Add `"background": true` to return a launch receipt immediately:
+
+```json
+{ "query": "Pi extension lifecycle", "limit": 5, "background": true }
+```
+
+The receipt contains `requestId`, `query`, and `status: "running"`. It is not search evidence. Launch several independent queries and continue unrelated work. Each query delivers one complete aggregate result or failure, in completion order. Active runs receive it at the next safe turn boundary; an idle agent wakes automatically. An in-flight model request is not rewritten.
+
+The agent receives the full answer, canonical pages and snippets, source attempts, timing, and redacted diagnostics. The user sees a compact card with the query, status, duration, result count, and source domains. Expand the card for the answer and pages; collapsing it never removes information from agent context.
+
+When no independent work remains, call `wait_for_web_searches` with `{}`. It waits for the searches outstanding when the call starts and returns their full results. Results already delivered automatically are not repeated. A later wait returns an empty `results` list once everything has been delivered. Searches launched after a wait starts belong to a later delivery.
+
+Stopping the agent cancels outstanding searches. Reloading Pi, switching sessions, or navigating to another session branch interrupts them without restarting them or delivering old results into the new history. Jobs are not persisted across reloads.
 
 ## Providers and aggregation
 
@@ -139,7 +155,7 @@ The report is redacted. It checks only whether an external credential is present
 
 ## Public API
 
-The public Pi extension entrypoint is the default export from `index.ts`. Loading it registers `web_search` and the user command `/pi-web-search-doctor`. The modules under `src/` are package-owned implementation details. The extension adds no skill or separate agent guide; all agent guidance is in the tool description.
+The public Pi extension entrypoint is the default export from `index.ts`. Loading it registers `web_search`, `wait_for_web_searches`, result-card rendering, and the user command `/pi-web-search-doctor`. The modules under `src/` are package-owned implementation details. The extension adds no skill or separate agent guide; all agent guidance is in the tool description.
 
 ## Development checks
 

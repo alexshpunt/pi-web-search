@@ -79,7 +79,9 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 async function captureTool(): Promise<CapturedTool> {
   let captured: CapturedTool | undefined;
   await registerWebSearch({
-    registerTool: (tool: CapturedTool) => { captured = tool; },
+    on: vi.fn(),
+    registerMessageRenderer: vi.fn(),
+    registerTool: (tool: CapturedTool & { name: string }) => { if (tool.name === "web_search") captured = tool; },
     registerCommand: vi.fn(),
   } as unknown as Parameters<typeof registerWebSearch>[0]);
   expect(captured).toBeDefined();

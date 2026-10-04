@@ -3,7 +3,6 @@ import path from "node:path";
 
 import {
   assistantMessage,
-  getProviderSystemPrompt,
   PiIntegrationTest,
   testArtifactsDir,
   text,
@@ -26,7 +25,10 @@ test("sends web-first research rules to the model through real Pi", async () => 
       conversation: [assistantMessage([text("Ready")])],
     }).run("Check the available research instructions");
 
-    const prompt = getProviderSystemPrompt(result);
+    const messages = result.providerRequests[0]?.messages as Array<{ role: string; sections?: Record<string, string> }>;
+    const system = messages.find((message) => message.role === "system");
+    expect(system?.sections).toBeDefined();
+    const prompt = Object.values(system!.sections!).join("\n");
     expect(prompt).toContain("- web_search: Search the public web for information on any topic.");
     expect(prompt).toContain("Use web_search when the user mentions an external dependency, package, extension, product, service, or other external reference to find what they mean and get current information.");
     expect(prompt).toContain("Use web_search to verify external facts and find up-to-date information instead of relying on memory.");

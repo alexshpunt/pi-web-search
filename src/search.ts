@@ -16,6 +16,8 @@ function redact(v: string): string {
     .replace(/(api[-_ ]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/giu, "$1=[redacted]")
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/giu, "$1[redacted]@"));
 }
+/** Redacts credentials and bounds diagnostic errors before they enter agent context. */
+export { redact as redactSearchError };
 function extractError(payload: unknown, text: string): string {
   if (isJsonObject(payload)) {
     const e = payload.error;
