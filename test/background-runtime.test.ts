@@ -30,7 +30,8 @@ describe("background search delivery", () => {
     await vi.waitFor(() => expect(runtime.readyCount()).toBe(1));
     expect(sendMessage).not.toHaveBeenCalled();
     const result = runtime.deliverBoundary(boundary());
-    expect(result?.entries).toHaveLength(1);
+    expect(result?.entries?.filter((entry) => entry.type === "custom_message")).toHaveLength(1);
+    expect(result?.entries?.filter((entry) => entry.type === "custom")).toHaveLength(1);
     expect(result?.continue).toBe(true);
     expect(JSON.stringify(result?.entries)).toContain("fast");
     expect(runtime.deliverBoundary(boundary())).toBeUndefined();

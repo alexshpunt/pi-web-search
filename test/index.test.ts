@@ -19,6 +19,7 @@ describe("standalone extension boundary", () => {
     const pi = {
       on: vi.fn(),
       registerMessageRenderer: vi.fn(),
+      registerEntryRenderer: vi.fn(),
       registerTool: (tool: CapturedTool) => tools.push(tool),
       registerCommand: (name: string) => commands.push(name),
     } as unknown as Parameters<typeof registerWebSearch>[0];
@@ -43,6 +44,7 @@ describe("standalone extension boundary", () => {
     const pi = {
       on: vi.fn(),
       registerMessageRenderer: vi.fn(),
+      registerEntryRenderer: vi.fn(),
       registerTool: tool,
       registerCommand: vi.fn(),
     } as unknown as Parameters<typeof registerWebSearch>[0];
