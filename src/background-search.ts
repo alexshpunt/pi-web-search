@@ -3,10 +3,13 @@ import { redactSearchError } from "./search.ts";
 import type { SearchDetails } from "./types.ts";
 
 export const BACKGROUND_SEARCH_MESSAGE = "web-search:result";
+export const BACKGROUND_SEARCH_CARD = "web-search:card";
 
 /** Full agent-facing completion, independent of the card's collapsed view. */
 export interface BackgroundSearchResult {
   requestId: string;
+  /** Real visible outer execution, captured from tool events before the launch returns. */
+  parentToolCallId?: string;
   query: string;
   status: "completed" | "failed";
   durationMs: number;
@@ -21,6 +24,7 @@ export function formatBackgroundSearchResult(result: BackgroundSearchResult): st
 
 interface SearchJob {
   requestId: string;
+  parentToolCallId?: string;
   controller: AbortController;
   done: Promise<void>;
   finish: () => void;
@@ -36,13 +40,23 @@ interface DeliveryBoundary {
 export class BackgroundSearchRuntime {
   private readonly jobs = new Map<string, SearchJob>();
   private ready: SearchJob[] = [];
+  private cards: BackgroundSearchResult[] = [];
+  private readonly owners = new Map<string, string | undefined>();
   private waiting = new Set<string>();
   private context?: ExtensionContext;
   private removeAbortListener?: () => void;
   private turnSignal?: AbortSignal;
   private idleDeliveryPending = false;
 
-  constructor(private readonly pi: Pick<ExtensionAPI, "sendMessage">) {}
+  constructor(private readonly pi: Pick<ExtensionAPI, "sendMessage" | "appendEntry">) {}
+
+  /** Resolves only observed execution ancestry; an unknown parent remains ownerless. */
+  executionStarted(toolCallId: string, parentToolCallId?: string): void {
+    this.owners.set(toolCallId, parentToolCallId === undefined ? toolCallId : this.owners.get(parentToolCallId));
+  }
+
+  /** Releases active ancestry after launches have copied their visible owner. */
+  executionEnded(toolCallId: string): void { this.owners.delete(toolCallId); }
 
   /** Refreshes the context and observes explicit cancellation without owning the tool-call lifetime. */
   setContext(ctx: ExtensionContext): void {
@@ -63,7 +77,7 @@ export class BackgroundSearchRuntime {
     this.setContext(ctx);
     if (this.jobs.has(requestId)) throw new Error(`Background search already exists: ${requestId}`);
     let finish!: () => void;
-    const job: SearchJob = { requestId, controller: new AbortController(), done: new Promise((resolve) => { finish = resolve; }), finish: () => finish() };
+    const job: SearchJob = { requestId, parentToolCallId: this.owners.get(requestId), controller: new AbortController(), done: new Promise((resolve) => { finish = resolve; }), finish: () => finish() };
     this.jobs.set(requestId, job);
     this.updateStatus();
     const started = Date.now();
@@ -99,7 +113,9 @@ export class BackgroundSearchRuntime {
       await Promise.all(snapshot.map((job) => job.done));
       signal?.throwIfAborted();
       if (snapshot.some((job) => job.controller.signal.aborted)) throw new DOMException("Background search wait interrupted", "AbortError");
-      return this.takeReady((job) => reserved.has(job.requestId));
+      const results = this.takeReady((job) => reserved.has(job.requestId));
+      this.cards.push(...results);
+      return results;
     } finally {
       signal?.removeEventListener("abort", abort);
       if (this.waiting === reserved) this.waiting = new Set();
@@ -113,10 +129,15 @@ export class BackgroundSearchRuntime {
       this.cancelAll();
       return;
     }
-    if (!event.context.canContinue) return;
-    const results = this.takeReady((job) => !this.waiting.has(job.requestId));
-    if (!results.length) return;
-    return { entries: [...event.entries, ...results.map((result) => ({ type: "custom_message" as const, ...this.message(result) }))], continue: true };
+    const results = event.context.canContinue ? this.takeReady((job) => !this.waiting.has(job.requestId)) : [];
+    const cards = [...this.cards, ...results];
+    if (!cards.length) return;
+    this.cards = [];
+    return {
+      entries: [...event.entries, ...cards.map((result) => this.card(result)),
+        ...results.map((result) => ({ type: "custom_message" as const, ...this.message(result) }))],
+      ...(results.length > 0 && { continue: true }),
+    };
   }
 
   /** Wakes a fully idle agent with one result; remaining results use the next atomic boundary. */
@@ -127,6 +148,7 @@ export class BackgroundSearchRuntime {
     const [result] = this.takeReady((candidate) => candidate === job);
     if (!result) return;
     this.idleDeliveryPending = true;
+    this.pi.appendEntry(BACKGROUND_SEARCH_CARD, result);
     this.pi.sendMessage(this.message(result), { triggerTurn: true });
   }
 
@@ -144,6 +166,7 @@ export class BackgroundSearchRuntime {
     }
     this.jobs.clear();
     this.ready = [];
+    this.cards = [];
     this.waiting = new Set();
     this.idleDeliveryPending = false;
     this.updateStatus();
@@ -152,6 +175,7 @@ export class BackgroundSearchRuntime {
   /** Disposes session resources on reload/shutdown, or starts fresh in a different branch. */
   reset(ctx?: ExtensionContext): void {
     this.cancelAll();
+    this.owners.clear();
     this.removeAbortListener?.();
     this.removeAbortListener = undefined;
     this.turnSignal = undefined;
@@ -164,7 +188,7 @@ export class BackgroundSearchRuntime {
 
   private complete(job: SearchJob, result: BackgroundSearchResult): void {
     if (this.jobs.get(job.requestId) !== job || job.controller.signal.aborted) return;
-    job.result = result;
+    job.result = { ...result, ...(job.parentToolCallId !== undefined && { parentToolCallId: job.parentToolCallId }) };
     this.ready.push(job);
     job.finish();
     this.updateStatus();
@@ -179,8 +203,12 @@ export class BackgroundSearchRuntime {
     return selected.map((job) => job.result!);
   }
 
+  private card(result: BackgroundSearchResult): SessionBoundaryDraft {
+    return { type: "custom", customType: BACKGROUND_SEARCH_CARD, data: result };
+  }
+
   private message(result: BackgroundSearchResult) {
-    return { customType: BACKGROUND_SEARCH_MESSAGE, content: formatBackgroundSearchResult(result), display: true, details: result };
+    return { customType: BACKGROUND_SEARCH_MESSAGE, content: formatBackgroundSearchResult(result), display: false, details: result };
   }
 
   private updateStatus(): void {
