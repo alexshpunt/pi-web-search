@@ -43,7 +43,9 @@ The receipt contains `requestId`, `query`, and `status: "running"`. It is not se
 
 The agent receives the full answer, canonical pages and snippets, source attempts, timing, and redacted diagnostics. The user sees a compact card with the query, status, duration, result count, and source domains. Expand the card for the answer and pages; collapsing it never removes information from agent context.
 
-When no independent work remains, call `wait_for_web_searches` with `{}`. It waits for the searches outstanding when the call starts and returns their full results. Results already delivered automatically are not repeated. A later wait returns an empty `results` list once everything has been delivered. Searches launched after a wait starts belong to a later delivery.
+In Stereo fullscreen, each delayed card appears in Activity beside the call that launched it, not in Conversation. Searches launched inside Codemode or another tool stay with their real visible outer call. Calls keep their own cards even when searches finish out of order. Late card text remains searchable, and saved history keeps its chronological order.
+
+When no independent work remains, call `wait_for_web_searches` with `{}`. It waits for the searches outstanding when the call starts and returns their full results. Wait shows only a short consumption confirmation; the full cards remain at their original calls. Results already delivered automatically are not repeated. A later wait returns an empty `results` list once everything has been delivered. Searches launched after a wait starts belong to a later delivery.
 
 Stopping the agent cancels outstanding searches. Reloading Pi, switching sessions, or navigating to another session branch interrupts them without restarting them or delivering old results into the new history. Jobs are not persisted across reloads.
 
@@ -169,6 +171,15 @@ pnpm run pack:check
 ```
 
 `pnpm test` runs the deterministic standalone suite. `pack:check` checks the archive contents. Tests and fixtures stay outside the published archive.
+
+The optional Stereo ownership checks need a separate, unchanged Stereo extension entrypoint. They exercise real direct and nested Codemode searches in Rows and Columns, through automatic delivery and explicit Wait:
+
+```bash
+PI_WEB_SEARCH_STEREO_EXTENSION=/absolute/path/to/pi-stereo-view/src/index.ts \
+  pnpm exec vitest run test/background-linked.integration.test.ts
+```
+
+Without that environment variable, these cross-extension cases are skipped.
 
 Installed-package verification is separate and mandatory before release. Keep the archive under `.lpt/package-archives/`, install it into an isolated workspace, then point verification at the installed entrypoint:
 
