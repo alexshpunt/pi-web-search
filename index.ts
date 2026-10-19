@@ -1,10 +1,10 @@
 import { Type, type Static } from "typebox";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { loadWebsearchConfig } from "#src/config.ts";
 import { formatWebSearchDoctorReport } from "#src/doctor.ts";
 import { formatSearchText } from "#src/search-format.ts";
 import { performSearch } from "#src/search.ts";
-import { BACKGROUND_SEARCH_MESSAGE, BackgroundSearchRuntime, formatBackgroundSearchResult, type BackgroundSearchResult } from "#src/background-search.ts";
+import { BACKGROUND_SEARCH_CARD, BACKGROUND_SEARCH_MESSAGE, BackgroundSearchRuntime, formatBackgroundSearchResult, type BackgroundSearchResult } from "#src/background-search.ts";
 import { renderBackgroundSearchCard } from "#src/background-renderer.ts";
 import type { JsonObject } from "#src/types.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -20,7 +20,7 @@ const webSearchSchema = Type.Unsafe<{ query: string; limit?: number; background?
 });
 type WebSearchParameters = Static<typeof webSearchSchema>;
 const backgroundResultSchema = Type.Unsafe<BackgroundSearchResult>(Type.Object({
-  requestId: Type.String(), query: Type.String(), status: Type.Union([Type.Literal("completed"), Type.Literal("failed")]),
+  requestId: Type.String(), parentToolCallId: Type.Optional(Type.String()), query: Type.String(), status: Type.Union([Type.Literal("completed"), Type.Literal("failed")]),
   durationMs: Type.Number(), search: Type.Optional(Type.Unknown()), error: Type.Optional(Type.String()),
 }));
 const description = "Search the public web for information on any topic.";
@@ -28,6 +28,8 @@ const description = "Search the public web for information on any topic.";
 /** Registers blocking/background search, explicit waiting, result cards, and the doctor command. */
 export default async function registerWebSearch(pi: ExtensionAPI): Promise<void> {
   const background = new BackgroundSearchRuntime(pi);
+  pi.on("tool_execution_start", (event) => background.executionStarted(event.toolCallId, event.parentToolCallId));
+  pi.on("tool_execution_end", (event) => background.executionEnded(event.toolCallId));
   pi.on("session_start", (_event, ctx) => background.reset(ctx));
   pi.on("session_tree", (_event, ctx) => background.reset(ctx));
   pi.on("session_shutdown", () => background.reset());
@@ -36,6 +38,7 @@ export default async function registerWebSearch(pi: ExtensionAPI): Promise<void>
   pi.on("agent_before_settle", (event, ctx) => { background.setContext(ctx); return background.deliverBoundary(event); });
   pi.on("agent_settled", (_event, ctx) => { background.resume(ctx); background.deliverIdle(); });
   pi.registerMessageRenderer<BackgroundSearchResult>(BACKGROUND_SEARCH_MESSAGE, (message, options, theme) => message.details ? renderBackgroundSearchCard(message.details, options, theme) : undefined);
+  pi.registerEntryRenderer<BackgroundSearchResult>(BACKGROUND_SEARCH_CARD, (entry, options, theme) => entry.data ? renderBackgroundSearchCard(entry.data, { ...options, outputPad: 0 }, theme) : undefined);
   pi.registerTool({
     name: "web_search", label: "Web search", description, executionMode: "parallel",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
@@ -79,11 +82,10 @@ export default async function registerWebSearch(pi: ExtensionAPI): Promise<void>
         details: { results }, structuredContent: { results } as unknown as JsonObject,
       };
     },
-    renderResult(result, options, theme) {
-      const container = new Container();
-      if (!result.details?.results.length) return new Text(result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"), 0, 0);
-      for (const completion of result.details.results) container.addChild(renderBackgroundSearchCard(completion, { expanded: options.expanded, outputPad: 0 }, theme));
-      return container;
+    renderResult(result, _options, theme) {
+      const count = result.details?.results.length;
+      if (count === undefined) return new Text(result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"), 0, 0);
+      return new Text(theme.fg("muted", count ? `Consumed ${count} web search ${count === 1 ? "result" : "results"}. Cards remain at the original calls.` : "No outstanding web search results."), 0, 0);
     },
   });
   pi.registerCommand("pi-web-search-doctor", {
