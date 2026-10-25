@@ -142,5 +142,13 @@ test("an explicit stop cancels detached search HTTP work and does not deliver a 
   expect(new Set(report.started)).toEqual(new Set(["slow", "fast"]));
   expect(new Set(report.aborted)).toEqual(new Set(["slow", "fast"]));
   expect(report.completed).toEqual([]);
+  const snapshot = result.traceEvents.findLast(event => event.type === "session_snapshot");
+  const branch = snapshot?.branch as Array<{ type: string; customType?: string; data?: { requestId: string; status: string } }>;
+  const cancellations = branch.filter(entry => entry.type === "custom" && entry.customType === "web-search:cancelled");
+  expect(cancellations.map(entry => entry.data).sort((a, b) => a!.requestId.localeCompare(b!.requestId))).toEqual([
+    { requestId: "fast-launch", parentToolCallId: "fast-launch", status: "cancelled" },
+    { requestId: "slow-launch", parentToolCallId: "slow-launch", status: "cancelled" },
+  ]);
+  expect(result.providerRequests).toHaveLength(2);
   expect(backgroundMessages(result)).toHaveLength(0);
 }, 30_000);
