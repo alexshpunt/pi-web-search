@@ -49,6 +49,8 @@ When no independent work remains, call `wait_for_web_searches` with `{}`. It wai
 
 Stopping the agent cancels outstanding searches. Reloading Pi, switching sessions, or navigating to another session branch interrupts them without restarting them or delivering old results into the new history. Jobs are not persisted across reloads.
 
+Cancellation from Stop or a failed model turn saves one passive `web-search:cancelled` custom entry per outstanding request. Its data is `{ requestId, status: "cancelled", parentToolCallId? }`. Session-work consumers can release ownership from this receipt without starting another model turn. Session replacement and reload discard old runtime work without adding cancellation entries to the replacement history.
+
 ## Providers and aggregation
 
 Supported external providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Parallel, Google CSE, Z.AI, OpenAI, Codex, Anthropic, Perplexity, xAI, and Kimi. Every enabled provider with valid settings and available credentials runs. DuckDuckGo HTML remains the zero-configuration default.

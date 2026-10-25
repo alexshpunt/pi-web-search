@@ -158,23 +158,35 @@ export class BackgroundSearchRuntime {
     this.setContext(ctx);
   }
 
-  /** Cancels and forgets branch-owned work; ignored aborts cannot route late results. */
-  cancelAll(): void {
-    for (const job of this.jobs.values()) {
-      job.controller.abort(new DOMException("Background web search cancelled", "AbortError"));
-      job.finish();
-    }
+  /** Cancels branch work without waking the agent; ownership receipts survive Stop. */
+  cancelAll(): void { this.clearJobs(true); }
+
+  private clearJobs(persistCancellation: boolean): void {
+    const cancelled = [...this.jobs.values()];
+    // Detach first: abort listeners can reenter cancellation, and transports may
+    // ignore abort or finish after a different branch reuses the same call ID.
     this.jobs.clear();
     this.ready = [];
     this.cards = [];
     this.waiting = new Set();
     this.idleDeliveryPending = false;
+    for (const job of cancelled) {
+      job.controller.abort(new DOMException("Background web search cancelled", "AbortError"));
+      job.finish();
+    }
     this.updateStatus();
+    if (persistCancellation) {
+      for (const job of cancelled) this.pi.appendEntry("web-search:cancelled", {
+        requestId: job.requestId,
+        ...(job.parentToolCallId !== undefined && { parentToolCallId: job.parentToolCallId }),
+        status: "cancelled",
+      });
+    }
   }
 
   /** Disposes session resources on reload/shutdown, or starts fresh in a different branch. */
   reset(ctx?: ExtensionContext): void {
-    this.cancelAll();
+    this.clearJobs(false);
     this.owners.clear();
     this.removeAbortListener?.();
     this.removeAbortListener = undefined;

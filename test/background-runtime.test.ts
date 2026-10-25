@@ -11,12 +11,13 @@ const deferred = () => {
 };
 function setup() {
   const sendMessage = vi.fn();
-  const runtime = new BackgroundSearchRuntime({ sendMessage } as unknown as ExtensionAPI);
+  const appendEntry = vi.fn();
+  const runtime = new BackgroundSearchRuntime({ sendMessage, appendEntry } as unknown as ExtensionAPI);
   const controller = new AbortController();
   let idle = false;
   const ctx = { signal: controller.signal, isIdle: () => idle, ui: { setStatus: vi.fn() } } as unknown as ExtensionContext;
   runtime.setContext(ctx);
-  return { runtime, ctx, controller, sendMessage, settle: () => { idle = true; runtime.setContext({ ...ctx, signal: undefined }); } };
+  return { runtime, ctx, controller, sendMessage, appendEntry, settle: () => { idle = true; runtime.setContext({ ...ctx, signal: undefined }); } };
 }
 const boundary = () => ({ entries: [], outcome: "completed" as const, context: { canContinue: true } });
 
@@ -54,7 +55,7 @@ describe("background search delivery", () => {
   });
 
   it("cancels providers on stop and ignores late completions even when transport ignores abort", async () => {
-    const { runtime, ctx, controller, sendMessage, settle } = setup();
+    const { runtime, ctx, controller, sendMessage, appendEntry, settle } = setup();
     const result = deferred();
     let signal!: AbortSignal;
     runtime.start("cancel", "cancel", (ownedSignal) => { signal = ownedSignal; return result.promise; }, ctx);
@@ -63,6 +64,7 @@ describe("background search delivery", () => {
     controller.abort();
     await expect(wait).rejects.toThrow(/abort|interrupt|cancel/i);
     expect(signal.aborted).toBe(true);
+    expect(appendEntry.mock.calls).toEqual([["web-search:cancelled", { requestId: "cancel", status: "cancelled" }]]);
     settle();
     result.resolve(details);
     await Promise.resolve();
@@ -71,7 +73,7 @@ describe("background search delivery", () => {
   });
 
   it("resets session ownership without replaying paid searches or routing stale results", async () => {
-    const { runtime, ctx, sendMessage } = setup();
+    const { runtime, ctx, sendMessage, appendEntry } = setup();
     const result = deferred();
     let signal!: AbortSignal;
     runtime.start("old-branch", "old", (ownedSignal) => { signal = ownedSignal; return result.promise; }, ctx);
@@ -82,8 +84,54 @@ describe("background search delivery", () => {
     await Promise.resolve();
     expect(runtime.deliverBoundary(boundary())).toBeUndefined();
     expect(sendMessage).not.toHaveBeenCalled();
+    expect(appendEntry).not.toHaveBeenCalled();
   });
 
+  it("records each provider-error cancellation once without waking a stopped agent or poisoning its retry", async () => {
+    const { runtime, ctx, sendMessage, appendEntry, settle } = setup();
+    const old = deferred();
+    let signal!: AbortSignal;
+    runtime.executionStarted("outer");
+    runtime.executionStarted("request", "outer");
+    runtime.start("request", "old", (ownedSignal) => { signal = ownedSignal; return old.promise; }, ctx);
+    await Promise.resolve();
+    const wait = runtime.wait();
+    const interrupted = expect(wait).rejects.toBeInstanceOf(DOMException);
+    expect(runtime.deliverBoundary({ ...boundary(), outcome: "error" })).toBeUndefined();
+    runtime.cancelAll();
+    expect(runtime.deliverBoundary({ ...boundary(), outcome: "error" })).toBeUndefined();
+    await interrupted;
+    expect(signal.aborted).toBe(true);
+    expect(appendEntry.mock.calls).toEqual([["web-search:cancelled", { requestId: "request", parentToolCallId: "outer", status: "cancelled" }]]);
+    expect(await runtime.wait()).toEqual([]);
+    settle();
+    old.resolve({ ...details, answer: "late discarded result" });
+    await Promise.resolve();
+    expect(runtime.readyCount()).toBe(0);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(runtime.deliverBoundary(boundary())).toBeUndefined();
+    runtime.resume(ctx);
+    runtime.start("retry", "new", async () => details, ctx);
+    expect((await runtime.wait()).map(result => result.requestId)).toEqual(["retry"]);
+    expect(appendEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it("detaches every cancelled job before abort listeners run", async () => {
+    const { runtime, ctx, appendEntry } = setup();
+    for (const id of ["first", "second"]) {
+      runtime.start(id, id, signal => {
+        signal.addEventListener("abort", () => runtime.cancelAll(), { once: true });
+        return new Promise(() => {});
+      }, ctx);
+    }
+    await Promise.resolve();
+    runtime.cancelAll();
+    expect(appendEntry.mock.calls).toEqual([
+      ["web-search:cancelled", { requestId: "first", status: "cancelled" }],
+      ["web-search:cancelled", { requestId: "second", status: "cancelled" }],
+    ]);
+    expect(await runtime.wait()).toEqual([]);
+  });
   it("delivers rejected search diagnostics as a correlated failure without exposing credentials", async () => {
     const { runtime, ctx } = setup();
     runtime.start("failure", "failure", () => Promise.reject(new Error("HTTP 401 Bearer secret-token apiKey=private-key")), ctx);
