@@ -34,7 +34,8 @@ function isUnsafeFormattingControl(codePoint: number): boolean {
   return codePoint === 0x061c || codePoint === 0x200e || codePoint === 0x200f || (codePoint >= 0x202a && codePoint <= 0x202e) || (codePoint >= 0x2066 && codePoint <= 0x2069);
 }
 
-function sanitizePresentationControls(value: string): string {
+/** Removes terminal and bidirectional controls from one displayed line. */
+export function sanitizePresentationControls(value: string): string {
   return Array.from(value, (character) => {
     const codePoint = character.codePointAt(0)!;
     if (isC0OrC1Control(codePoint)) return isWhitespaceControl(codePoint) ? " " : "";
