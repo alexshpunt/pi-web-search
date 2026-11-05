@@ -81,6 +81,7 @@ async function captureTool(): Promise<CapturedTool> {
   await registerWebSearch({
     on: vi.fn(),
     registerMessageRenderer: vi.fn(),
+    registerEntryRenderer: vi.fn(),
     registerTool: (tool: CapturedTool & { name: string }) => { if (tool.name === "web_search") captured = tool; },
     registerCommand: vi.fn(),
   } as unknown as Parameters<typeof registerWebSearch>[0]);

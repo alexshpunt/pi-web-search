@@ -110,271 +110,62 @@ afterEach(() => {
 });
 
 describe("aggregate external search contract", () => {
-  it("starts every external source before allowing any source to finish", async () => {
-    const barrier = new StartBarrier(2);
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
-      const provider = requestUrl(input).includes("serper") ? "serper" : "brave";
-      await barrier.arrive(provider);
-      return provider === "serper"
-        ? serper([{ title: "Serper", link: "https://example.com/serper" }])
-        : brave([{ title: "Brave", url: "https://example.com/brave" }]);
-    }));
-
-    const search = aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
+  it("waits for the first provider and stops after its successful response on every query", async () => {
+    const gate = deferred<Response>();
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      expect(requestUrl(input)).toContain("serper");
+      return (await gate.promise).clone();
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const search = aggregateSearch(aggregateConfig(), { query: "first", maxResults: 10 });
     await settle();
-    const beforeRelease = [...barrier.started].sort();
-    barrier.release();
-    await search;
-
-    expect(beforeRelease).toEqual(["brave", "serper"]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    gate.resolve(serper([{ title: "First", link: "https://example.com/first" }]));
+    const result = await search;
+    expect(result.results.map(item => item.title)).toEqual(["First"]);
+    expect(result.attempts?.map(item => item.provider)).toEqual(["serper"]);
+    const next = await aggregateSearch(aggregateConfig(), { query: "second", maxResults: 10 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(next.attempts?.map(item => item.provider)).toEqual(["serper"]);
   });
 
-  it("ranks independent canonical results by distinct-source agreement first", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([
-          { title: "Only first", link: "https://example.com/only-first" },
-          { title: "Shared", link: "https://example.com/shared?utm_source=first" },
-        ])
-        : brave([
-          { title: "Only second", url: "https://example.com/only-second" },
-          { title: "Shared", url: "https://example.com/shared?fbclid=second" },
-        ]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    expect(details.results[0]).toMatchObject({
-      title: "Shared",
-      sources: ["serper/first", "brave/second"],
-    });
-  });
-
-  it("merges external URLs that differ only by an empty trailing slash", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([{ title: "Trailing slash", link: "https://example.com/page/" }])
-        : brave([{ title: "Canonical page", url: "https://example.com/page" }]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    expect(details.results).toHaveLength(1);
-    expect(details.results[0]).toMatchObject({
-      url: "https://example.com/page",
-      sources: ["serper/first", "brave/second"],
-    });
-  });
-
-  it("keeps root URLs and meaningful path/query distinctions while normalizing one trailing slash", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([
-          { title: "Root", link: "https://example.com/" },
-          { title: "Path", link: "https://example.com/a/" },
-          { title: "Query one", link: "https://example.com/a?x=1" },
-        ])
-        : brave([
-          { title: "Root duplicate", url: "https://example.com" },
-          { title: "Path duplicate", url: "https://example.com/a" },
-          { title: "Query two", url: "https://example.com/a?x=2" },
-          { title: "Double slash", url: "https://example.com/a//" },
-        ]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    expect(details.results.map((item) => item.url).sort()).toEqual([
-      "https://example.com/",
-      "https://example.com/a",
-      "https://example.com/a/",
-      "https://example.com/a?x=1",
-      "https://example.com/a?x=2",
+  it("canonicalizes and deduplicates the selected provider's results before limiting", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => serper([
+      { title: "First", link: "https://example.com/page/?utm_source=x#fragment" },
+      { title: "Duplicate", link: "https://example.com/page" },
+      { title: "Second", link: "https://example.com/page?x=1" },
+      { title: "Third", link: "https://example.com/page?x=2" },
+    ])));
+    const result = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 2 });
+    expect(result.results).toMatchObject([
+      { title: "First", url: "https://example.com/page", sources: ["serper/first"] },
+      { title: "Second", url: "https://example.com/page?x=1", sources: ["serper/first"] },
     ]);
-    expect(details.results.find((item) => item.url === "https://example.com/a")?.sources).toEqual(["serper/first", "brave/second"]);
+    expect(result.truncated).toBe(true);
+    expect(result.attempts?.map(item => item.provider)).toEqual(["serper"]);
   });
 
-  it("combines normalized positions across sources after agreement ties", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([
-          { title: "X", link: "https://example.com/x" },
-          { title: "Y", link: "https://example.com/y" },
-          { title: "Filler A", link: "https://example.com/a" },
-        ])
-        : brave([
-          { title: "Y", url: "https://example.com/y" },
-          { title: "Filler B", url: "https://example.com/b" },
-          { title: "X", url: "https://example.com/x" },
-        ]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    expect(details.results.slice(0, 2).map((item) => item.url)).toEqual([
-      "https://example.com/y",
-      "https://example.com/x",
-    ]);
-  });
-
-  it("uses normalized provider scores alone after agreement and position ties", async () => {
+  it("skips disabled and unconfigured providers and advances after empty results", async () => {
     const config = aggregateConfig({ providers: [
-      { id: "exa-one", provider: "exa", apiKey: "one" },
-      { id: "exa-two", provider: "exa", apiKey: "two" },
+      { id: "disabled", provider: "serper", apiKey: "key", enabled: false },
+      { id: "missing", provider: "serper" },
+      { id: "empty", provider: "serper", apiKey: "key" },
+      { id: "working", provider: "brave", apiKey: "key" },
     ] });
-    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      const apiKey = new Headers(init?.headers).get("x-api-key");
-      return new Response(JSON.stringify({ results: apiKey === "one"
-        ? [
-          { title: "Lower score", url: "https://example.com/a-lower", score: 0.2 },
-          { title: "Higher score", url: "https://example.com/z-higher", score: 0.9 },
-        ]
-        : [
-          { title: "Higher score", url: "https://example.com/z-higher", score: 0.8 },
-          { title: "Lower score", url: "https://example.com/a-lower", score: 0.3 },
-        ] }));
-    }));
-
-    const details = await aggregateSearch(config, { query: "q", maxResults: 20 });
-
-    expect(details.results.slice(0, 2).map((item) => item.url)).toEqual([
-      "https://example.com/z-higher",
-      "https://example.com/a-lower",
-    ]);
-  });
-
-  it("uses optional scores only when comparable and never treats a missing score as zero", async () => {
-    const config = aggregateConfig({ providers: [
-      { id: "scored", provider: "exa", apiKey: "key" },
-      { id: "scoreless", provider: "brave", apiKey: "key" },
-    ] });
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("exa.ai")
-        ? new Response(JSON.stringify({ results: [
-          { title: "Has score", url: "https://example.com/z-scored", score: 0.99 },
-        ] }))
-        : brave([{ title: "No score", url: "https://example.com/a-scoreless" }]),
-    ));
-
-    const details = await aggregateSearch(config, { query: "q", maxResults: 20 });
-
-    expect(details.results.map((item) => item.url)).toEqual([
-      "https://example.com/a-scoreless",
-      "https://example.com/z-scored",
-    ]);
-  });
-
-  it("uses canonical URL as the final deterministic tie-break", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([{ title: "Z", link: "https://example.com/z" }])
-        : brave([{ title: "A", url: "https://example.com/a" }]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    expect(details.results.map((item) => item.url)).toEqual([
-      "https://example.com/a",
-      "https://example.com/z",
-    ]);
-  });
-
-  it("selects the title and snippet from the strongest-position duplicate variant", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([
-          { title: "Filler", link: "https://example.com/filler" },
-          { title: "Weak title", link: "https://example.com/shared?utm_medium=test", snippet: "Weak snippet" },
-        ])
-        : brave([
-          { title: "Strong title", url: "https://example.com/shared?gclid=test", description: "Strong snippet" },
-        ]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    expect(details.results[0]).toMatchObject({ title: "Strong title", snippet: "Strong snippet" });
-  });
-
-  it("counts one strongest positional observation per provider when tracking variants repeat", async () => {
-    const repeated = Array.from({ length: 9 }, (_, index) => ({
-      title: index === 0 ? "Agreed A" : `A tracking variant ${index}`,
-      link: `https://example.com/a?utm_source=serper-${index}`,
-    }));
-    repeated.push({ title: "Agreed B", link: "https://example.com/b" });
-    const braveItems = [{ title: "Agreed B", url: "https://example.com/b" }];
-    for (let index = 0; index < 8; index += 1) braveItems.push({ title: `Filler ${index}`, url: `https://example.com/filler-${index}` });
-    braveItems.push({ title: "Agreed A", url: "https://example.com/a?gclid=brave" });
-
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper") ? serper(repeated) : brave(braveItems),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    // Both pages occur in both sources. Repeating A in Serper must not make its
-    // later variants count as extra positional evidence (or weaken its strongest position).
-    expect(details.results.slice(0, 2).map((item) => item.url)).toEqual([
-      "https://example.com/b",
-      "https://example.com/a",
-    ]);
-    expect(details.results[0]?.sources).toEqual(["serper/first", "brave/second"]);
-  });
-
-  it("keeps ranking stable when repeated canonical variants precede a later unique page", async () => {
-    let repeatedVariants = false;
+    const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
-      if (requestUrl(input).includes("serper")) {
-        const items = repeatedVariants
-          ? [
-            { title: "Y strongest", link: "https://example.com/y" },
-            { title: "Y tracking 1", link: "https://example.com/y?utm_source=one" },
-            { title: "Y tracking 2", link: "https://example.com/y?utm_source=two" },
-            { title: "Y tracking 3", link: "https://example.com/y?utm_source=three" },
-            { title: "X", link: "https://example.com/x" },
-          ]
-          : [
-            { title: "Y", link: "https://example.com/y" },
-            { title: "X", link: "https://example.com/x" },
-          ];
-        return serper(items);
-      }
-      return brave([
-        { title: "X", url: "https://example.com/x" },
-        { title: "Y", url: "https://example.com/y" },
-      ]);
+      const url = requestUrl(input); calls.push(url);
+      return url.includes("serper") ? serper([]) : brave([{ title: "Found", url: "https://example.com/found" }]);
     }));
-
-    const baseline = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-    repeatedVariants = true;
-    const withRepeatedVariants = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 });
-
-    // Both providers have the same unique order in both calls, so inserting
-    // repeated Y variants must not reverse the canonical tie-break order. The
-    // old full-list denominator ranked Y first in the second call.
-    const urls = (details: SearchDetails) => details.results.map((item) => item.url);
-    expect(urls(baseline)).toEqual(["https://example.com/x", "https://example.com/y"]);
-    expect(urls(withRepeatedVariants)).toEqual(urls(baseline));
-  });
-
-  it("applies the final limit only after agreement ranking", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
-      requestUrl(input).includes("serper")
-        ? serper([
-          { title: "Serper only", link: "https://example.com/serper-only" },
-          { title: "Shared", link: "https://example.com/shared?utm_campaign=test" },
-        ])
-        : brave([
-          { title: "Brave only", url: "https://example.com/brave-only" },
-          { title: "Shared", url: "https://example.com/shared?gclid=test" },
-        ]),
-    ));
-
-    const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 1 });
-
-    expect(details.results).toHaveLength(1);
-    expect(details.results[0]?.title).toBe("Shared");
-    expect(details.truncated).toBe(true);
+    const result = await aggregateSearch(config, { query: "q", maxResults: 10 });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain("serper");
+    expect(calls[1]).toContain("brave");
+    expect(result.attempts).toMatchObject([
+      { entryId: "empty", status: "empty" },
+      { entryId: "working", status: "success" },
+    ]);
+    expect(result.results.map(item => item.title)).toEqual(["Found"]);
   });
 
   it("returns partial results but treats completed empty sources as no usable output", async () => {
@@ -416,67 +207,39 @@ describe("aggregate external search contract", () => {
 });
 
 describe("raw native-first aggregate contract", () => {
-  it("keeps native prose unchanged while independently merging and ranking external URLs", async () => {
-    const barrier = new StartBarrier(3);
+  it("runs native and the first external provider concurrently and keeps both outputs", async () => {
+    const barrier = new StartBarrier(2);
     const nativeAnswer = "Native evidence: https://example.com/native-shared?utm_source=model";
     const runtime = nativeRuntime({
-      search: async ({ signal }) => {
+      search: async () => {
         await barrier.arrive("native");
-        signal.throwIfAborted();
         return { provider: "openai", model: "gpt-5", text: nativeAnswer };
       },
     });
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
       const provider = requestUrl(input).includes("serper") ? "serper" : "brave";
       await barrier.arrive(provider);
-      return provider === "serper"
-        ? serper([
-          { title: "Strong shared title", link: "https://example.com/native-shared?fbclid=x", snippet: "Shared evidence." },
-          { title: "Serper only", link: "https://example.com/serper-only" },
-        ])
-        : brave([
-          { title: "Weaker shared title", url: "https://example.com/native-shared?gclid=x" },
-          { title: "External only", url: "https://example.com/external-only" },
-        ]);
-    }));
-
+      return serper([
+        { title: "Shared title", link: "https://example.com/native-shared?fbclid=x", snippet: "Shared evidence." },
+        { title: "Serper only", link: "https://example.com/serper-only" },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetcher);
     const search = aggregateSearch(aggregateConfig(), { query: "q", maxResults: 20 }, undefined, runtime);
     await settle();
-    const beforeRelease = [...barrier.started].sort();
+    const started = [...barrier.started].sort();
     barrier.release();
     const details = await search;
-    const output = formatSearchText(details);
-
-    expect(beforeRelease).toEqual(["brave", "native", "serper"]);
+    expect(started).toEqual(["native", "serper"]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(details.native).toMatchObject({ status: "success", provider: "openai", model: "gpt-5" });
     expect(details.answer).toBe(nativeAnswer);
-    expect(details.results).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        title: "Strong shared title",
-        url: "https://example.com/native-shared",
-        sources: ["serper/first", "brave/second"],
-      }),
-      expect.objectContaining({ title: "Serper only", sources: ["serper/first"] }),
-      expect.objectContaining({ title: "External only", sources: ["brave/second"] }),
-    ]));
-    expect(details.results.filter((item) => item.url.includes("native-shared"))).toHaveLength(1);
-    expect(output).toBe([
-      nativeAnswer,
-      "",
-      "1. Strong shared title",
-      "   https://example.com/native-shared",
-      "   Excerpt: “Shared evidence.”",
-      "   Sources: serper/first, brave/second",
-      "2. External only",
-      "   https://example.com/external-only",
-      "   Sources: brave/second",
-      "3. Serper only",
-      "   https://example.com/serper-only",
-      "   Sources: serper/first",
+    expect(details.attempts?.map(item => item.provider)).toEqual(["serper"]);
+    expect(formatSearchText(details)).toBe([
+      nativeAnswer, "", "1. Shared title", "   https://example.com/native-shared",
+      "   Excerpt: “Shared evidence.”", "   Sources: serper/first",
+      "2. Serper only", "   https://example.com/serper-only", "   Sources: serper/first",
     ].join("\n"));
-    expect(output).not.toMatch(/openai|gpt-5|native\s+search|external\s+results|q external/i);
-    expect(details).toMatchObject({
-      native: { status: "success", provider: "openai", model: "gpt-5" },
-    });
   });
 
   it("classifies whitespace-only native prose as unusable without hiding external output", async () => {
@@ -646,7 +409,29 @@ describe("aggregate lifecycle contract with controlled time", () => {
 
     expect(abortedAtTimeout).toBe(true);
     expect(details.results.map((item) => item.title)).toEqual(["Fast"]);
-    expect(statuses(details)).toContain("timeout");
+    expect(statuses(details)).toEqual(["timeout", "success"]);
+  });
+
+  it("records a source timeout then the aggregate deadline for the active fallback only", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn(async () => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", fetcher);
+    const config = aggregateConfig({ sourceTimeoutMs: 1_000, aggregateDeadlineMs: 1_500, providers: [
+      { id: "one", provider: "serper", apiKey: "key" },
+      { id: "two", provider: "brave", apiKey: "key" },
+      { id: "never", provider: "tavily", apiKey: "key" },
+    ] });
+    const search = aggregateSearch(config, { query: "q", maxResults: 10 });
+    await settle();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(500);
+    const details = await search;
+    expect(details.attempts).toMatchObject([
+      { entryId: "one", status: "timeout", timeoutReason: "source-timeout" },
+      { entryId: "two", status: "timeout", timeoutReason: "aggregate-deadline" },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("turns every unfinished source into one private aggregate-deadline failure", async () => {
@@ -689,7 +474,7 @@ describe("aggregate lifecycle contract with controlled time", () => {
     const details = await search;
     const output = formatSearchText(details);
 
-    expect(abortedAtDeadline).toEqual(["brave", "native", "serper"]);
+    expect(abortedAtDeadline).toEqual(["native", "serper"]);
     expect(details.results).toEqual([]);
     expect(details.error).toBeTruthy();
     expect(details).toMatchObject({
@@ -699,10 +484,9 @@ describe("aggregate lifecycle contract with controlled time", () => {
         model: "gpt-5",
         timeoutReason: "aggregate-deadline",
       },
-      attempts: expect.arrayContaining([
+      attempts: [
         expect.objectContaining({ provider: "serper", status: "timeout", timeoutReason: "aggregate-deadline" }),
-        expect.objectContaining({ provider: "brave", status: "timeout", timeoutReason: "aggregate-deadline" }),
-      ]),
+      ],
     });
     expect(output.match(/web search failed/gi)).toHaveLength(1);
     expect(output).not.toContain("native private late result");
@@ -710,9 +494,9 @@ describe("aggregate lifecycle contract with controlled time", () => {
     expect(output).not.toContain("brave private late result");
   });
 
-  it("propagates caller cancellation to native work and every external fetch and rejects partial output", async () => {
+  it("propagates caller cancellation to native work and the attempted external fetch and rejects partial output", async () => {
     const controller = new AbortController();
-    const barrier = new StartBarrier(3);
+    const barrier = new StartBarrier(2);
     const aborted = new Set<string>();
     const runtime = nativeRuntime({
       search: async ({ signal }) => {
@@ -738,8 +522,8 @@ describe("aggregate lifecycle contract with controlled time", () => {
     controller.abort(new Error("caller cancelled"));
     const rejection = await search.then(() => undefined, (error: unknown) => error);
 
-    expect(started).toEqual(["brave", "native", "serper"]);
-    expect([...aborted].sort()).toEqual(["brave", "native", "serper"]);
+    expect(started).toEqual(["native", "serper"]);
+    expect([...aborted].sort()).toEqual(["native", "serper"]);
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toContain("caller cancelled");
   });
@@ -760,10 +544,9 @@ describe("aggregate deadline against abort-ignoring work", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const details = await search;
     expect(details.error).toBeTruthy();
-    expect(details.attempts).toEqual(expect.arrayContaining([
+    expect(details.attempts).toEqual([
       expect.objectContaining({ provider: "serper", timeoutReason: "aggregate-deadline" }),
-      expect.objectContaining({ provider: "brave", timeoutReason: "aggregate-deadline" }),
-    ]));
+    ]);
     expect(details.native).toMatchObject({ status: "timeout", timeoutReason: "aggregate-deadline" });
     expect(caller.signal.aborted).toBe(false);
   });
@@ -781,10 +564,9 @@ describe("native completion deadline against abort-ignoring work", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const details = await search;
     expect(details.native).toMatchObject({ status: "timeout", timeoutReason: "aggregate-deadline" });
-    expect(details.attempts).toEqual(expect.arrayContaining([
+    expect(details.attempts).toEqual([
       expect.objectContaining({ provider: "serper", timeoutReason: "aggregate-deadline" }),
-      expect.objectContaining({ provider: "brave", timeoutReason: "aggregate-deadline" }),
-    ]));
+    ]);
     expect(caller.signal.aborted).toBe(false);
   });
 });
