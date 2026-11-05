@@ -19,11 +19,31 @@ it("selects a supported subscription model independently of the active model", a
   expect(selected?.model.id).toBe("supported");
   expect(selected?.adapter.id).toBe("openai-codex-responses");
 });
+it("does not use an otherwise supported active model when the subscription is unavailable", async () => {
+  const openaiModel = { provider: "openai", api: "openai-responses", id: "gpt-5.6", baseUrl: "https://api.openai.com/v1" };
+  const selected = await selectNativeSearch({ model: openaiModel, modelRegistry: registry(false) as never, signal: new AbortController().signal, fetch: fetcher as never });
+  expect(selected).toBeUndefined();
+});
 it("does not use a Codex API key as a subscription", async () => {
   const selected = await selectNativeSearch({ model: active, modelRegistry: registry(false) as never, signal: new AbortController().signal, fetch: fetcher as never });
   expect(selected).toBeUndefined();
 });
 
+it("uses only the external provider when no subscription is available", async () => {
+  const original = (globalThis as Record<symbol, unknown>)[transport];
+  const complete = vi.fn();
+  (globalThis as Record<symbol, unknown>)[transport] = async () => Response.json({ web: { results: [{ title: "Page", url: "https://example.com/page" }] } });
+  try {
+    const activeModel = { provider: "openai", api: "openai-responses", id: "gpt-5.6", baseUrl: "https://api.openai.com/v1" };
+    const result = await performSearch({ providers: [{ provider: "brave", apiKey: "key" }], strategy: "priority", fallback: true }, { query: "q", maxResults: 5 }, undefined, { activeModel, modelRegistry: { ...registry(false), complete } });
+    expect(complete).not.toHaveBeenCalled();
+    expect(result.native?.status).toBe("ineligible");
+    expect(result.results).toHaveLength(1);
+  } finally {
+    if (original === undefined) delete (globalThis as Record<symbol, unknown>)[transport];
+    else (globalThis as Record<symbol, unknown>)[transport] = original;
+  }
+});
 it("combines subscription output with one external provider even when another model is active", async () => {
   const original = (globalThis as Record<symbol, unknown>)[transport];
   const complete = vi.fn(async (_model: unknown) => ({ content: [{ type: "text", text: "Codex answer" }] }));
