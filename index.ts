@@ -14,7 +14,7 @@ const webSearchSchema = Type.Unsafe<{ query: string; limit?: number; background?
   properties: {
     query: { $ref: "#/$defs/WebSearchQuery" },
     limit: { type: "integer", minimum: 1, maximum: 20, description: "Maximum external results" },
-    background: { type: "boolean", description: "Return a request ID immediately and deliver the full result automatically when ready. Defaults to false." },
+    background: { type: "boolean", description: "Return a request ID immediately and deliver each source result automatically as it becomes available. Defaults to false." },
   },
   $defs: { WebSearchQuery: { type: "string", minLength: 1, description: "Plain web search query" } },
 });
@@ -47,8 +47,8 @@ export default async function registerWebSearch(pi: ExtensionAPI): Promise<void>
       "Use web_search when the user mentions an external dependency, package, extension, product, service, or other external reference to find what they mean and get current information.",
       "Use web_search to verify external facts and find up-to-date information instead of relying on memory.",
       "When missing factual information can be found online, search with web_search before asking the user to clarify. Ask only if the search does not resolve the uncertainty or the question is about the user's intent or preferences.",
-      "Use web_search with background: true to launch independent searches while doing other work. The launch receipt is not a search result. Each full result or failure arrives as a correlated message at a safe turn boundary and wakes an idle agent.",
-      "Wait for search evidence before making decisions that depend on it. When no independent work remains, call wait_for_web_searches after the launch receipts; already delivered results are not repeated.",
+      "Use web_search with background: true to launch independent searches while doing other work. The launch receipt is not a search result. Each source result or failure arrives as a correlated message at a safe turn boundary and wakes an idle agent.",
+      "Wait for search evidence before making decisions that depend on it. When no independent work remains, call wait_for_web_searches for pending source results; already delivered results are not repeated.",
     ],
     parameters: webSearchSchema,
     async execute(toolCallId, parameters: WebSearchParameters, signal, _onUpdate, context) {
@@ -60,18 +60,19 @@ export default async function registerWebSearch(pi: ExtensionAPI): Promise<void>
       const config = loaded.config;
       const maxResults = parameters.limit ?? config.maxResults ?? 10;
       const runtime = { modelRegistry: context.modelRegistry };
-      const search = (ownedSignal?: AbortSignal) => performSearch(config, { query: parameters.query, maxResults }, ownedSignal, runtime);
+      const search = (ownedSignal: AbortSignal, onSource: (details: import("#src/types.ts").SearchDetails) => void) => performSearch(config, { query: parameters.query, maxResults }, ownedSignal, runtime, onSource);
       if (parameters.background) {
-        const receipt = background.start(toolCallId, parameters.query, search, context);
-        return { content: [{ type: "text", text: `${JSON.stringify(receipt)}\nThe full result will arrive automatically. Continue only independent work, or call wait_for_web_searches.` }], details: receipt };
+        void background.startProgressive(toolCallId, parameters.query, search, context, true).catch(() => {});
+        const receipt = { requestId: toolCallId, query: parameters.query, status: "running" as const };
+        return { content: [{ type: "text", text: `${JSON.stringify(receipt)}\nSource results arrive automatically. Continue independent work or call wait_for_web_searches.` }], details: receipt };
       }
-      const details = await search(signal);
-      return { content: [{ type: "text", text: formatSearchText(details) }], details };
+      const details = await background.startProgressive(toolCallId, parameters.query, search, context, false, signal);
+      return { content: [{ type: "text", text: `${formatSearchText(details)}${background.isPending(toolCallId) ? `\n\nOther source results may arrive later for request ${toolCallId}.` : ""}` }], details };
     },
   });
   pi.registerTool({
     name: "wait_for_web_searches", label: "Wait for web searches", executionMode: "sequential",
-    description: "Wait for all outstanding background web searches already launched when this call starts. Returns full results not already delivered automatically. No polling is needed. Searches launched afterward are not included; interrupted waits fail rather than returning partial success.",
+    description: "Wait for the next available results from outstanding web searches. Returns source results not already delivered automatically; other sources may still be running. Searches launched afterward are not included. Interrupted waits fail.",
     promptSnippet: "Wait for outstanding background web search results.",
     parameters: Type.Object({}, { additionalProperties: false }),
     outputSchema: Type.Object({ results: Type.Array(backgroundResultSchema) }),

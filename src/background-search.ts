@@ -28,8 +28,9 @@ interface SearchJob {
   controller: AbortController;
   done: Promise<void>;
   finish: () => void;
-  result?: BackgroundSearchResult;
+  finished?: boolean;
 }
+interface ReadyResult { job: SearchJob; result: BackgroundSearchResult; }
 interface DeliveryBoundary {
   entries: SessionBoundaryDraft[];
   outcome: "completed" | "aborted" | "error";
@@ -39,10 +40,11 @@ interface DeliveryBoundary {
 /** Owns detached searches for one session branch and routes each completion exactly once. */
 export class BackgroundSearchRuntime {
   private readonly jobs = new Map<string, SearchJob>();
-  private ready: SearchJob[] = [];
+  private ready: ReadyResult[] = [];
   private cards: BackgroundSearchResult[] = [];
   private readonly owners = new Map<string, string | undefined>();
   private waiting = new Set<string>();
+  private notifyWait?: () => void;
   private context?: ExtensionContext;
   private removeAbortListener?: () => void;
   private turnSignal?: AbortSignal;
@@ -65,7 +67,7 @@ export class BackgroundSearchRuntime {
       this.removeAbortListener?.();
       this.turnSignal = ctx.signal;
       const signal = ctx.signal;
-      const abort = () => this.cancelAll();
+      const abort = () => this.cancelAll(signal?.reason);
       signal?.addEventListener("abort", abort, { once: true });
       this.removeAbortListener = () => signal?.removeEventListener("abort", abort);
     }
@@ -99,6 +101,59 @@ export class BackgroundSearchRuntime {
     return { requestId, query, status: "running" as const };
   }
 
+  /** Returns the first usable foreground source while retaining the other sources for delivery. */
+  startProgressive(requestId: string, query: string, search: (signal: AbortSignal, onSource: (details: SearchDetails) => void) => Promise<SearchDetails>, ctx: ExtensionContext, background: boolean, signal?: AbortSignal): Promise<SearchDetails> {
+    ctx.signal?.throwIfAborted();
+    signal?.throwIfAborted();
+    this.setContext(ctx);
+    if (this.jobs.has(requestId)) throw new Error(`Background search already exists: ${requestId}`);
+    let finish!: () => void;
+    const job: SearchJob = { requestId, parentToolCallId: this.owners.get(requestId), controller: new AbortController(), done: new Promise(resolve => { finish = resolve; }), finish: () => finish() };
+    this.jobs.set(requestId, job);
+    this.updateStatus();
+    const started = Date.now();
+    let firstReturned = false;
+    let emitted = 0;
+    const buffered: SearchDetails[] = [];
+    let resolveFirst!: (details: SearchDetails) => void;
+    let rejectFirst!: (error: unknown) => void;
+    const first = new Promise<SearchDetails>((resolve, reject) => { resolveFirst = resolve; rejectFirst = reject; });
+    const cancelled = () => rejectFirst(job.controller.signal.reason);
+    job.controller.signal.addEventListener("abort", cancelled, { once: true });
+    const callerAbort = () => this.cancelAll(signal?.reason);
+    signal?.addEventListener("abort", callerAbort, { once: true });
+    const queue = (details: SearchDetails) => this.enqueue(job, { requestId, query, status: details.error ? "failed" : "completed", durationMs: details.durationMs, search: details });
+    const onSource = (details: SearchDetails) => {
+      if (this.jobs.get(requestId) !== job || job.controller.signal.aborted) return;
+      emitted++;
+      if (background) { queue(details); return; }
+      if (!firstReturned) {
+        if (!details.error && (details.results.length > 0 || details.answer?.trim())) {
+          firstReturned = true;
+          signal?.removeEventListener("abort", callerAbort);
+          resolveFirst(details);
+          for (const item of buffered) queue(item);
+          buffered.length = 0;
+        } else buffered.push(details);
+      } else queue(details);
+    };
+    void Promise.resolve().then(() => {
+      job.controller.signal.throwIfAborted();
+      return search(job.controller.signal, onSource);
+    }).then(details => {
+      if (this.jobs.get(requestId) !== job || job.controller.signal.aborted) return;
+      if (background) { if (!emitted) queue(details); resolveFirst(details); }
+      else if (!firstReturned) resolveFirst(details);
+      this.finishJob(job);
+    }, error => {
+      if (this.jobs.get(requestId) !== job || job.controller.signal.aborted) return;
+      if (firstReturned || background) this.enqueue(job, { requestId, query, status: "failed", durationMs: Date.now() - started, error: redactSearchError(error instanceof Error ? error.message : "Web search failed") });
+      if (!firstReturned) rejectFirst(error);
+      this.finishJob(job);
+    }).finally(() => { signal?.removeEventListener("abort", callerAbort); job.controller.signal.removeEventListener("abort", cancelled); });
+    return first;
+  }
+
   /** Waits for the current outstanding set; reserves those results against automatic delivery. */
   async wait(signal?: AbortSignal): Promise<BackgroundSearchResult[]> {
     signal?.throwIfAborted();
@@ -107,10 +162,16 @@ export class BackgroundSearchRuntime {
     if (!snapshot.length) return [];
     const reserved = new Set(snapshot.map((job) => job.requestId));
     this.waiting = reserved;
-    const abort = () => this.cancelAll();
+    const abort = () => this.cancelAll(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      await Promise.all(snapshot.map((job) => job.done));
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (this.ready.some(item => reserved.has(item.job.requestId)) || snapshot.every(job => job.finished || job.controller.signal.aborted)) resolve();
+        };
+        this.notifyWait = check;
+        check();
+      });
       signal?.throwIfAborted();
       if (snapshot.some((job) => job.controller.signal.aborted)) throw new DOMException("Background search wait interrupted", "AbortError");
       const results = this.takeReady((job) => reserved.has(job.requestId));
@@ -119,6 +180,7 @@ export class BackgroundSearchRuntime {
     } finally {
       signal?.removeEventListener("abort", abort);
       if (this.waiting === reserved) this.waiting = new Set();
+      this.notifyWait = undefined;
       this.deliverIdle();
     }
   }
@@ -143,9 +205,9 @@ export class BackgroundSearchRuntime {
   /** Wakes a fully idle agent with one result; remaining results use the next atomic boundary. */
   deliverIdle(): void {
     if (this.idleDeliveryPending || !this.context?.isIdle() || this.context.signal) return;
-    const job = this.ready.find((job) => !this.waiting.has(job.requestId));
-    if (!job) return;
-    const [result] = this.takeReady((candidate) => candidate === job);
+    const item = this.ready.find(({ job }) => !this.waiting.has(job.requestId));
+    if (!item) return;
+    const [result] = this.takeReady((_job, candidate) => candidate === item);
     if (!result) return;
     this.idleDeliveryPending = true;
     this.pi.appendEntry(BACKGROUND_SEARCH_CARD, result);
@@ -159,9 +221,9 @@ export class BackgroundSearchRuntime {
   }
 
   /** Cancels branch work without waking the agent; ownership receipts survive Stop. */
-  cancelAll(): void { this.clearJobs(true); }
+  cancelAll(reason?: unknown): void { this.clearJobs(true, reason); }
 
-  private clearJobs(persistCancellation: boolean): void {
+  private clearJobs(persistCancellation: boolean, reason?: unknown): void {
     const cancelled = [...this.jobs.values()];
     // Detach first: abort listeners can reenter cancellation, and transports may
     // ignore abort or finish after a different branch reuses the same call ID.
@@ -171,10 +233,11 @@ export class BackgroundSearchRuntime {
     this.waiting = new Set();
     this.idleDeliveryPending = false;
     for (const job of cancelled) {
-      job.controller.abort(new DOMException("Background web search cancelled", "AbortError"));
+      job.controller.abort(reason === undefined ? new DOMException("Background web search cancelled", "AbortError") : reason);
       job.finish();
     }
     this.updateStatus();
+    this.notifyWait?.();
     if (persistCancellation) {
       for (const job of cancelled) this.pi.appendEntry("web-search:cancelled", {
         requestId: job.requestId,
@@ -195,24 +258,40 @@ export class BackgroundSearchRuntime {
     if (ctx) this.setContext(ctx);
   }
 
+  /** Whether a search still has source work in flight. */
+  isPending(requestId: string): boolean { const job = this.jobs.get(requestId); return Boolean(job && !job.finished); }
+
   /** Number of completed results still awaiting a delivery path. */
   readyCount(): number { return this.ready.length; }
 
   private complete(job: SearchJob, result: BackgroundSearchResult): void {
+    this.enqueue(job, result);
+    this.finishJob(job);
+  }
+
+  private enqueue(job: SearchJob, result: BackgroundSearchResult): void {
     if (this.jobs.get(job.requestId) !== job || job.controller.signal.aborted) return;
-    job.result = { ...result, ...(job.parentToolCallId !== undefined && { parentToolCallId: job.parentToolCallId }) };
-    this.ready.push(job);
-    job.finish();
+    this.ready.push({ job, result: { ...result, ...(job.parentToolCallId !== undefined && { parentToolCallId: job.parentToolCallId }) } });
+    this.notifyWait?.();
     this.updateStatus();
     this.deliverIdle();
   }
 
-  private takeReady(matches: (job: SearchJob) => boolean): BackgroundSearchResult[] {
-    const selected = this.ready.filter(matches);
-    this.ready = this.ready.filter((job) => !selected.includes(job));
-    for (const job of selected) this.jobs.delete(job.requestId);
+  private finishJob(job: SearchJob): void {
+    if (this.jobs.get(job.requestId) !== job) return;
+    job.finished = true;
+    job.finish();
+    this.notifyWait?.();
+    if (!this.ready.some(item => item.job === job)) this.jobs.delete(job.requestId);
     this.updateStatus();
-    return selected.map((job) => job.result!);
+  }
+
+  private takeReady(matches: (job: SearchJob, item: ReadyResult) => boolean): BackgroundSearchResult[] {
+    const selected = this.ready.filter(item => matches(item.job, item));
+    this.ready = this.ready.filter(item => !selected.includes(item));
+    for (const { job } of selected) if (job.finished && !this.ready.some(item => item.job === job)) this.jobs.delete(job.requestId);
+    this.updateStatus();
+    return selected.map(item => item.result);
   }
 
   private card(result: BackgroundSearchResult): SessionBoundaryDraft {
@@ -224,7 +303,7 @@ export class BackgroundSearchRuntime {
   }
 
   private updateStatus(): void {
-    const pending = this.jobs.size - this.ready.length;
+    const pending = [...this.jobs.values()].filter(job => !job.finished).length;
     this.context?.ui.setStatus("web-search:background", pending ? `Web search: ${pending} running` : undefined);
   }
 }
