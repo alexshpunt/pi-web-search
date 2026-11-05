@@ -100,9 +100,9 @@ export default function backgroundSearchTransport(pi: ExtensionAPI): void {
     }
   });
   pi.on("tool_execution_start", (event) => {
-    if (event.toolName === "wait_for_web_searches" && process.env.PI_WEB_SEARCH_BACKGROUND_MODE === "wait" && pending.size) {
-      release("fast");
-      setTimeout(() => release("slow"), 30);
+    if (event.toolName === "wait_for_web_searches" && process.env.PI_WEB_SEARCH_BACKGROUND_MODE === "wait") {
+      if (pending.has("fast")) release("fast");
+      else if (pending.has("slow")) release("slow");
     }
   });
   persist();

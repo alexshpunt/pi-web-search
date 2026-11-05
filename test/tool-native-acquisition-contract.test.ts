@@ -19,19 +19,12 @@ type ActiveModel = {
   baseUrl: string;
 };
 
-type ToolResult = {
-  content: Array<{ type: string; text: string }>;
-  details: { native?: { status?: string }; results?: Array<{ title?: string }> };
-};
-
+type SearchResult = { native?: { status?: string; timeoutReason?: string }; results?: Array<{ title?: string }>; answer?: string; attempts?: unknown[]; error?: string };
+type ToolResult = { content: Array<{ type: string; text: string }>; details: SearchResult };
 type CapturedTool = {
-  execute(
-    toolCallId: string,
-    parameters: { query: string; limit?: number },
-    signal: AbortSignal,
-    onUpdate: (result: unknown) => void,
-    context: { cwd: string; model: ActiveModel; modelRegistry: ModelRegistry },
-  ): Promise<ToolResult>;
+  execute(toolCallId: string, parameters: { query: string; limit?: number }, signal: AbortSignal, onUpdate: (result: unknown) => void,
+    context: { cwd: string; model: ActiveModel; modelRegistry: ModelRegistry }): Promise<ToolResult>;
+  wait(): Promise<Array<{ requestId: string; query: string; search?: SearchResult }>>;
 };
 
 const workspaces: string[] = [];
@@ -78,15 +71,27 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 
 async function captureTool(): Promise<CapturedTool> {
   let captured: CapturedTool | undefined;
+  let waitTool: { execute(...args: unknown[]): Promise<{ details: { results: Array<{ requestId: string; query: string; search?: SearchResult }> } }> } | undefined;
   await registerWebSearch({
     on: vi.fn(),
+    sendMessage: vi.fn(),
+    appendEntry: vi.fn(),
     registerMessageRenderer: vi.fn(),
     registerEntryRenderer: vi.fn(),
-    registerTool: (tool: CapturedTool & { name: string }) => { if (tool.name === "web_search") captured = tool; },
+    registerTool: (tool: CapturedTool & { name: string }) => {
+      if (tool.name === "web_search") captured = tool;
+      if (tool.name === "wait_for_web_searches") waitTool = tool as unknown as typeof waitTool;
+    },
     registerCommand: vi.fn(),
   } as unknown as Parameters<typeof registerWebSearch>[0]);
   expect(captured).toBeDefined();
-  return captured!;
+  expect(waitTool).toBeDefined();
+  return {
+    execute: (id, parameters, signal, update, context) => captured!.execute(id, parameters, signal, update, {
+      ...context, ui: { setStatus: vi.fn() }, isIdle: () => false,
+    } as typeof context),
+    wait: async () => (await waitTool!.execute("wait", {}, undefined)).details.results,
+  };
 }
 
 async function workspace(overrides: Record<string, unknown> = {}): Promise<string> {
@@ -154,7 +159,8 @@ describe("real tool/coordinator native capability acquisition", () => {
     });
     expect(complete).not.toHaveBeenCalled();
     expect(transport).toHaveBeenCalledOnce();
-    expect(result.details).toMatchObject({ native: { status: "ineligible" }, results: [{ title: "External" }] });
+    expect(result.details).toMatchObject({ results: [{ title: "External" }] });
+    expect(await tool.wait()).toEqual([]);
   });
   it("returns the detailed no-usable-output result with empty providers and an ineligible active model", async () => {
     const cwd = await workspace({ providers: [] });
@@ -245,12 +251,12 @@ describe("real tool/coordinator native capability acquisition", () => {
     expect([...barrier.started].sort()).toEqual(["external", "native"]);
     expect(bypassSearch).not.toHaveBeenCalled();
     expect(result.content[0]?.text).toContain("Codex evidence");
-    expect(result.content[0]?.text).toContain("External success");
     expect(result.details.native).toMatchObject({ status: "success" });
+    expect(await tool.wait()).toMatchObject([{ requestId: "call", query: "q", search: { results: [{ title: "External success" }] } }]);
   });
 
 
-  it("starts external work before metadata resolves, then joins native completion to the outstanding aggregate", async () => {
+  it("starts external work before metadata resolves and delivers each source independently", async () => {
     const cwd = await workspace();
     const tool = await captureTool();
     const signal = new AbortController().signal;
@@ -310,7 +316,7 @@ describe("real tool/coordinator native capability acquisition", () => {
     }));
     const result = await pending;
     expect(result.content[0]?.text).toContain("Native joins");
-    expect(result.content[0]?.text).toContain("External finishes");
+    expect(await tool.wait()).toMatchObject([{ requestId: "call", query: "q", search: { results: [{ title: "External finishes" }] } }]);
   });
 
   it("shares caller cancellation with metadata, native completion, and external work", async () => {
@@ -379,7 +385,7 @@ describe("real tool/coordinator native capability acquisition", () => {
     expect(externalSignal?.aborted).toBe(true);
     expect([...aborted].sort()).toEqual(["external", "native"]);
     expect(failure).toBeInstanceOf(Error);
-    expect(String(failure)).toContain("caller cancelled");
+    expect(failure).toBe(controller.signal.reason);
   });
 
 
@@ -465,8 +471,13 @@ describe("real tool/coordinator native capability acquisition", () => {
     expect(bypassSearch).not.toHaveBeenCalled();
     expect(result.content[0]?.text).toContain("External survives");
     expect(result.content[0]?.text).not.toContain("private metadata body");
-    expect(result.details.native).toMatchObject({ status: name === "wrong model" ? "ineligible" : "failure" });
-    if (name !== "wrong model") expect(JSON.stringify(result.details.native)).not.toContain("private metadata body");
+    const late = await tool.wait();
+    if (name === "wrong model") {
+      expect(late).toEqual([]);
+    } else {
+      expect(late).toMatchObject([{ requestId: "call", query: "q", search: { native: { status: "failure" } } }]);
+      expect(JSON.stringify(late)).not.toContain("private metadata body");
+    }
     expect(result.details.results?.map((item) => item.title)).toEqual(["External survives"]);
     expect(globalFetch).not.toHaveBeenCalled();
   });
