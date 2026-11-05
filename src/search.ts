@@ -1,6 +1,6 @@
 import { buildSearchRequest } from "./providers/request.ts";
 import { normalizeSearchResponse } from "./providers/response.ts";
-import { acquireNativeSearchAdapter, type NativeAdapter } from "./native-search.ts";
+import { selectNativeSearch, type NativeAdapter } from "./native-search.ts";
 import type { JsonObject, NativeDetails, SearchAttempt, SearchDetails, SearchProviderEntry, SearchRequest, SearchResultItem, WebsearchConfig } from "./types.ts";
 export { formatSearchText } from "./search-format.ts";
 
@@ -115,28 +115,36 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   const sourceTimeoutMs = config.sourceTimeoutMs ?? 30_000;
   const attemptsBy = new Map<string, SearchAttempt>();
   const groups: Array<{ entry: SearchProviderEntry; items: SearchResultItem[] }> = [];
-  const externalStates = config.providers.filter((entry) => entry.enabled !== false && (entry.provider === "duckduckgo-html" || (entry.provider === "google-cse" ? Boolean(entry.apiKey && entry.searchEngineId) : Boolean(entry.apiKey)))).map((entry) => ({ entry, startedAt: Date.now(), settled: false }));
-  const sourceTasks = externalStates.map((state) => (async () => {
-    const controller = childController(aggregateController.signal);
-    const outcome = await raceWithTimeout(providerSearch(state.entry, request, controller.signal, fetchImpl), sourceTimeoutMs, controller);
-    if (state.settled) return;
-    state.settled = true;
-    if (outcome.timedOut) { attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "source-timeout" }); return; }
-    if (outcome.error) {
-      attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "failure", error: redact(outcome.error instanceof Error ? outcome.error.message : "Search request failed") });
-      return;
+  const externalStates = config.providers.filter((entry) => entry.enabled !== false && (entry.provider === "duckduckgo-html" || (entry.provider === "google-cse" ? Boolean(entry.apiKey && entry.searchEngineId) : Boolean(entry.apiKey)))).map((entry) => ({ entry, startedAt: 0, started: false, settled: false }));
+  const externalTask = (async () => {
+    for (const state of externalStates) {
+      if (aggregateController.signal.aborted) break;
+      state.started = true;
+      state.startedAt = Date.now();
+      const controller = childController(aggregateController.signal);
+      const outcome = await raceWithTimeout(providerSearch(state.entry, request, controller.signal, fetchImpl), sourceTimeoutMs, controller);
+      if (state.settled) return;
+      state.settled = true;
+      if (outcome.timedOut) { attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "source-timeout" }); continue; }
+      if (outcome.error) {
+        attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "failure", error: redact(outcome.error instanceof Error ? outcome.error.message : "Search request failed") });
+        continue;
+      }
+      const result = outcome.value!;
+      const aggregateTimedOut = result.details.error === AGGREGATE_DEADLINE_REASON;
+      attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: result.details.durationMs, resultsCount: result.details.results.length, status: aggregateTimedOut ? "timeout" : statusFor(result.details), timeoutReason: aggregateTimedOut ? "aggregate-deadline" : undefined, ...(result.details.error && !aggregateTimedOut && { error: redact(result.details.error) }) });
+      if (!result.details.error && result.items.length) {
+        groups.push({ entry: state.entry, items: result.items });
+        break;
+      }
     }
-    const result = outcome.value!;
-    const aggregateTimedOut = result.details.error === AGGREGATE_DEADLINE_REASON;
-    attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: result.details.durationMs, resultsCount: result.details.results.length, status: aggregateTimedOut ? "timeout" : statusFor(result.details), timeoutReason: aggregateTimedOut ? "aggregate-deadline" : undefined, ...(result.details.error && !aggregateTimedOut && { error: truncate(result.details.error) }) });
-    if (!result.details.error) groups.push({ entry: state.entry, items: result.items });
-  })());
+  })();
 
   let native: NativeDetails = { status: "ineligible" };
-  const nativeModel = runtime?.activeModel;
+  let nativeModel = runtime?.activeModel;
   const nativeState = { settled: false };
   const nativeTask = (async () => {
-    if (!nativeModel) return;
+    if (!runtime || (!nativeModel && !runtime.modelRegistry)) return;
     const metadataStarted = Date.now();
     const sourceDeadline = metadataStarted + sourceTimeoutMs;
     // One controller and deadline cover capability acquisition and completion.
@@ -144,20 +152,23 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
     let adapter: NativeAdapter | { search: any } | undefined;
     try {
       const acquiredResult = runtime.nativeSource
-        ? { value: runtime.nativeSource.isEligible(nativeModel) ? runtime.nativeSource : undefined, timedOut: false, error: undefined }
-        : runtime.modelRegistry ? await raceWithTimeout(acquireNativeSearchAdapter({ model: nativeModel, modelRegistry: runtime.modelRegistry, signal: controller.signal, fetch: fetchImpl }), Math.max(0, sourceDeadline - Date.now()), controller)
+        ? { value: nativeModel && runtime.nativeSource.isEligible(nativeModel) ? { model: nativeModel, adapter: runtime.nativeSource } : undefined, timedOut: false, error: undefined }
+        : runtime.modelRegistry ? await raceWithTimeout(selectNativeSearch({ model: nativeModel, modelRegistry: runtime.modelRegistry, signal: controller.signal, fetch: fetchImpl }), Math.max(0, sourceDeadline - Date.now()), controller)
         : { value: undefined, timedOut: false, error: undefined };
-      if (acquiredResult.timedOut) { if (!nativeState.settled) { nativeState.settled = true; native = { status: "timeout", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted, timeoutReason: "source-timeout" }; } return; }
+      if (acquiredResult.timedOut) { if (!nativeState.settled) { nativeState.settled = true; native = { status: "timeout", provider: nativeModel?.provider, model: nativeModel?.id, durationMs: Date.now() - metadataStarted, timeoutReason: "source-timeout" }; } return; }
       if (acquiredResult.error) throw acquiredResult.error;
-      adapter = acquiredResult.value;
-      if (!runtime.nativeSource && runtime.modelRegistry && !adapter) { nativeState.settled = true; native = { status: "ineligible", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted }; return; }
+      if (acquiredResult.value) {
+        nativeModel = acquiredResult.value.model;
+        adapter = acquiredResult.value.adapter;
+      }
+      if (!runtime.nativeSource && runtime.modelRegistry && !adapter) { nativeState.settled = true; native = { status: "ineligible", provider: nativeModel?.provider, model: nativeModel?.id, durationMs: Date.now() - metadataStarted }; return; }
     } catch (error) {
       if (signal?.aborted) return;
-      if (!nativeState.settled) native = { status: "failure", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted, error: redact(error instanceof Error ? error.message : "Native capability acquisition failed") };
+      if (!nativeState.settled) { nativeState.settled = true; native = { status: "failure", provider: nativeModel?.provider, model: nativeModel?.id, durationMs: Date.now() - metadataStarted, error: redact(error instanceof Error ? error.message : "Native capability acquisition failed") }; }
       return;
     }
     if (nativeState.settled) return;
-    if (!adapter) { nativeState.settled = true; native = { status: "ineligible", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted }; return; }
+    if (!adapter || !nativeModel) { nativeState.settled = true; native = { status: "ineligible", provider: nativeModel?.provider, model: nativeModel?.id, durationMs: Date.now() - metadataStarted }; return; }
     const remaining = sourceDeadline - Date.now();
     if (remaining <= 0) { nativeState.settled = true; native = { status: "timeout", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - metadataStarted, timeoutReason: "source-timeout" }; controller.abort(new Error("source-timeout")); return; }
     const task = Promise.resolve().then(() => runtime.nativeSource ? runtime.nativeSource.search({ query: request.query, model: nativeModel, signal: controller.signal }) : (adapter as NativeAdapter).search({ query: request.query, model: nativeModel, modelRegistry: runtime.modelRegistry, signal: controller.signal, fetch: fetchImpl }));
@@ -178,8 +189,8 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   const deadline = setTimeout(() => {
     deadlineReached = true;
     aggregateController.abort(new Error(AGGREGATE_DEADLINE_REASON));
-    for (const state of externalStates) if (!state.settled) { state.settled = true; attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" }); }
-    if (!nativeState.settled && nativeModel) { nativeState.settled = true; native = { status: "timeout", provider: nativeModel.provider, model: nativeModel.id, durationMs: Date.now() - started, timeoutReason: "aggregate-deadline" }; }
+    for (const state of externalStates) if (state.started && !state.settled) { state.settled = true; attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" }); }
+    if (!nativeState.settled && runtime && (nativeModel || runtime.modelRegistry)) { nativeState.settled = true; native = { status: "timeout", provider: nativeModel?.provider, model: nativeModel?.id, durationMs: Date.now() - started, timeoutReason: "aggregate-deadline" }; }
     releaseDeadline();
   }, aggregateDeadlineMs);
   let releaseCaller!: (reason: unknown) => void;
@@ -188,7 +199,7 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   signal?.removeEventListener("abort", onCallerAbort);
   signal?.addEventListener("abort", callerListener, { once: true });
   try {
-    await Promise.race([Promise.all([...sourceTasks, nativeTask]), deadlinePromise, callerPromise]);
+    await Promise.race([Promise.all([externalTask, nativeTask]), deadlinePromise, callerPromise]);
   } finally {
     clearTimeout(deadline);
     signal?.removeEventListener("abort", callerListener);
@@ -196,7 +207,7 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   }
   if (signal?.aborted) throw signal.reason;
   // Underlying providers are allowed to ignore abort. Their handlers remain attached and cannot alter finalized state.
-  if (deadlineReached) for (const state of externalStates) if (!attemptsBy.has(label(state.entry))) attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" });
+  if (deadlineReached) for (const state of externalStates) if (state.started && !attemptsBy.has(label(state.entry))) attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" });
   const nativeText = (native as NativeDetails & { text?: string }).text;
   const ranked = rankItems(groups, request.maxResults);
   const attempts = externalStates.map((state) => attemptsBy.get(label(state.entry))).filter((attempt): attempt is SearchAttempt => Boolean(attempt));

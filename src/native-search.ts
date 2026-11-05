@@ -1,7 +1,7 @@
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 export const CODEX_CLIENT_VERSION = "0.151.0";
-type ActiveModel = { provider: string; api: string; id: string; baseUrl: string; [key: string]: unknown };
+type ActiveModel = { provider: string; api: string; id: string; baseUrl: string };
 type NativeResult = { text: string; provider: string; model: string };
 type Input = { query: string; model: ActiveModel; modelRegistry: ModelRegistry; signal: AbortSignal; fetch: typeof fetch };
 export interface NativeAdapter { id: string; search(input: Input): Promise<NativeResult>; }
@@ -133,6 +133,25 @@ export async function acquireNativeSearchAdapter(input: { model: ActiveModel; mo
   if (input.model.provider === "openai-codex" && input.model.api === "openai-codex-responses") return codexAcquire(input);
   if (input.model.provider === "openrouter" && input.model.api === "openai-completions") return openRouterAcquire(input);
   return providerAdapter(input.model, staticId(input.model) ?? (input.model.provider === "anthropic" && input.model.api === "anthropic-messages" ? "anthropic-messages" : input.model.provider === "xai" && input.model.api === "openai-responses" ? "xai-responses" : undefined) ?? "");
+}
+/** Prefer an available Codex OAuth subscription, otherwise use the active model. */
+export async function selectNativeSearch(input: { model?: ActiveModel; modelRegistry: ModelRegistry; signal: AbortSignal; fetch: typeof fetch }): Promise<{ model: ActiveModel; adapter: NativeAdapter } | undefined> {
+  const registry = input.modelRegistry;
+  const candidates = typeof registry.getAvailable === "function" ? registry.getAvailable().filter((model) => model.provider === "openai-codex" && model.api === "openai-codex-responses") : [];
+  let metadata: Promise<Response> | undefined;
+  const cachedFetch: typeof fetch = async (url, options) => {
+    metadata ??= input.fetch(url, options);
+    return (await metadata).clone();
+  };
+  for (const candidate of candidates) {
+    if (!registry.isUsingOAuth(candidate)) break;
+    const model = candidate as ActiveModel;
+    const adapter = await acquireNativeSearchAdapter({ ...input, model, fetch: cachedFetch });
+    if (adapter) return { model, adapter };
+  }
+  if (!input.model) return undefined;
+  const adapter = await acquireNativeSearchAdapter({ ...input, model: input.model });
+  return adapter ? { model: input.model, adapter } : undefined;
 }
 /** Resolves static native capability without performing network acquisition. */
 export function resolveNativeSearchAdapter(model: ActiveModel): NativeAdapter | undefined {
