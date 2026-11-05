@@ -34,7 +34,7 @@ async function run(mode: string, conversation: PiIntegrationTestOptions["convers
 
 function backgroundMessages(result: Awaited<ReturnType<typeof run>>["result"]) {
   const snapshot = result.traceEvents.findLast((event) => event.type === "session_snapshot");
-  const entries = snapshot?.branch as Array<{ type: string; customType?: string; content: unknown; details?: { query: string } }>;
+  const entries = snapshot?.branch as Array<{ type: string; customType?: string; content: unknown; details?: { query: string; search?: unknown } }>;
   return entries.filter((entry) => entry.type === "custom_message" && entry.customType === "web-search:result");
 }
 
@@ -58,7 +58,7 @@ test("launches parallel searches without blocking work and delivers full results
   expect(messages.map((message) => (message.details as { query: string }).query)).toEqual(["fast", "slow"]);
   for (const [index, query] of ["fast", "slow"].entries()) {
     expect(String(messages[index]!.content)).toContain(`${query.toUpperCase()}_TAIL_MARKER`);
-    expect(String(messages[index]!.content)).toContain('"native"');
+    expect(messages[index]!.details?.search).not.toHaveProperty("native");
     expect(String(messages[index]!.content)).toContain('"attempts"');
   }
   expect(getToolExecutionDetails(getToolExecution(result, "empty-wait"))).toMatchObject({ results: [] });
@@ -73,14 +73,17 @@ test("launches parallel searches without blocking work and delivers full results
 test("waits for outstanding searches without duplicate automatic delivery or a later repeated result", async () => {
   const { result, report } = await run("wait", [
     assistantMessage([call("slow-launch", "slow"), call("fast-launch", "fast")], { stopReason: "toolUse" }),
-    wait("wait-all"), wait("wait-again"), assistantMessage([text("Wait completed")]),
+    wait("wait-first"), wait("wait-second"), wait("wait-again"), assistantMessage([text("Wait completed")]),
   ]);
   expect(report.completed).toEqual(["fast", "slow"]);
-  expect(getToolExecution(result, "wait-all").isError).toBe(false);
-  const first = getToolExecutionDetails(getToolExecution(result, "wait-all")) as { results: Array<{ query: string }> };
-  expect(first.results.map((result) => result.query)).toEqual(["fast", "slow"]);
-  expect(getToolResultText(result, "wait-all")).toContain("FAST_TAIL_MARKER");
-  expect(getToolResultText(result, "wait-all")).toContain("SLOW_TAIL_MARKER");
+  expect(getToolExecution(result, "wait-first").isError).toBe(false);
+  expect(getToolExecution(result, "wait-second").isError).toBe(false);
+  const first = getToolExecutionDetails(getToolExecution(result, "wait-first")) as { results: Array<{ query: string }> };
+  const second = getToolExecutionDetails(getToolExecution(result, "wait-second")) as { results: Array<{ query: string }> };
+  expect(first.results.map((item) => item.query)).toEqual(["fast"]);
+  expect(second.results.map((item) => item.query)).toEqual(["slow"]);
+  expect(getToolResultText(result, "wait-first")).toContain("FAST_TAIL_MARKER");
+  expect(getToolResultText(result, "wait-second")).toContain("SLOW_TAIL_MARKER");
   expect(backgroundMessages(result)).toHaveLength(0);
   expect(getToolExecutionDetails(getToolExecution(result, "wait-again"))).toMatchObject({ results: [] });
   expect(result.tuiRenderedOutput).not.toContain("SLOW_TAIL_MARKER");
