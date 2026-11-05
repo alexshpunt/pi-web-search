@@ -1,3 +1,4 @@
+import { DEFAULT_AGGREGATE_DEADLINE_MS, DEFAULT_SOURCE_TIMEOUT_MS } from "./config.ts";
 import { buildSearchRequest } from "./providers/request.ts";
 import { normalizeSearchResponse } from "./providers/response.ts";
 import { selectNativeSearch, type NativeAdapter } from "./native-search.ts";
@@ -104,15 +105,15 @@ function raceWithTimeout<T>(promise: Promise<T>, ms: number, controller: AbortCo
 }
 function childController(parent: AbortSignal): AbortController { const controller = new AbortController(); parent.addEventListener("abort", () => controller.abort(parent.reason), { once: true }); return controller; }
 
-export async function performSearch(config: WebsearchConfig, request: SearchRequest, signal?: AbortSignal, runtime?: NativeRuntime): Promise<SearchDetails> {
+export async function performSearch(config: WebsearchConfig, request: SearchRequest, signal?: AbortSignal, runtime?: NativeRuntime, onSource?: (details: SearchDetails) => void): Promise<SearchDetails> {
   const started = Date.now();
   if (signal?.aborted) throw signal.reason;
   const fetchImpl = transport();
   const aggregateController = new AbortController();
   const onCallerAbort = () => aggregateController.abort(signal!.reason ?? new Error("Search cancelled"));
   signal?.addEventListener("abort", onCallerAbort, { once: true });
-  const aggregateDeadlineMs = config.aggregateDeadlineMs ?? 45_000;
-  const sourceTimeoutMs = config.sourceTimeoutMs ?? 30_000;
+  const aggregateDeadlineMs = config.aggregateDeadlineMs ?? DEFAULT_AGGREGATE_DEADLINE_MS;
+  const sourceTimeoutMs = config.sourceTimeoutMs ?? DEFAULT_SOURCE_TIMEOUT_MS;
   const attemptsBy = new Map<string, SearchAttempt>();
   const groups: Array<{ entry: SearchProviderEntry; items: SearchResultItem[] }> = [];
   const externalStates = config.providers.filter((entry) => entry.enabled !== false && (entry.provider === "duckduckgo-html" || (entry.provider === "google-cse" ? Boolean(entry.apiKey && entry.searchEngineId) : Boolean(entry.apiKey)))).map((entry) => ({ entry, startedAt: 0, started: false, settled: false }));
@@ -183,6 +184,40 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
     if (usableText) (native as NativeDetails & { text?: string }).text = result.text;
   })();
 
+  // Each lane is reported independently. The final return retains the original
+  // aggregate contract for callers that do not consume progressive reports.
+  let externalEmitted = false;
+  let nativeEmitted = false;
+  let callbackError: unknown;
+  let callbackFailed = false;
+  const emit = (details: SearchDetails) => {
+    if (!onSource || signal?.aborted) return;
+    try { onSource(details); } catch (error) { callbackFailed = true; callbackError = error; }
+  };
+  const baseDetails = (): SearchDetails => ({
+    provider: groups[0]?.entry.provider ?? config.providers[0]?.provider ?? "duckduckgo-html",
+    query: request.query, results: [], durationMs: Date.now() - started, truncated: false,
+    migrationWarnings: config.migrationWarnings, aggregateDeadlineMs, sourceTimeoutMs,
+  });
+  const emitExternal = () => {
+    if (externalEmitted || !externalStates.length || signal?.aborted) return;
+    externalEmitted = true;
+    const ranked = rankItems(groups, request.maxResults);
+    const attempts = externalStates.map((state) => attemptsBy.get(label(state.entry))).filter((attempt): attempt is SearchAttempt => Boolean(attempt));
+    const details = { ...baseDetails(), results: ranked.results, truncated: ranked.truncated || attempts.some((attempt) => attempt.resultsCount >= request.maxResults && attempt.status === "success"), attempts };
+    emit(ranked.results.length ? details : { ...details, error: "External search returned no usable results." });
+  };
+  const emitNative = () => {
+    if (nativeEmitted || native.status === "ineligible" || signal?.aborted) return;
+    nativeEmitted = true;
+    const { text, ...diagnostics } = native as NativeDetails & { text?: string };
+    const details = { ...baseDetails(), native: diagnostics };
+    emit(text ? { ...details, answer: text } : { ...details, error: "Native search returned no usable answer." });
+  };
+  // Promise handlers run in completion order and are attached even when
+  // transports ignore abort. Emission guards freeze deadline/cancel outcomes.
+  const reportingExternalTask = externalTask.then(emitExternal);
+  const reportingNativeTask = nativeTask.then(emitNative);
   let deadlineReached = false;
   let releaseDeadline!: () => void;
   const deadlinePromise = new Promise<void>((resolve) => { releaseDeadline = resolve; });
@@ -191,6 +226,8 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
     aggregateController.abort(new Error(AGGREGATE_DEADLINE_REASON));
     for (const state of externalStates) if (state.started && !state.settled) { state.settled = true; attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" }); }
     if (!nativeState.settled && runtime && (nativeModel || runtime.modelRegistry)) { nativeState.settled = true; native = { status: "timeout", provider: nativeModel?.provider, model: nativeModel?.id, durationMs: Date.now() - started, timeoutReason: "aggregate-deadline" }; }
+    emitExternal();
+    emitNative();
     releaseDeadline();
   }, aggregateDeadlineMs);
   let releaseCaller!: (reason: unknown) => void;
@@ -199,13 +236,14 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   signal?.removeEventListener("abort", onCallerAbort);
   signal?.addEventListener("abort", callerListener, { once: true });
   try {
-    await Promise.race([Promise.all([externalTask, nativeTask]), deadlinePromise, callerPromise]);
+    await Promise.race([Promise.all([reportingExternalTask, reportingNativeTask]), deadlinePromise, callerPromise]);
   } finally {
     clearTimeout(deadline);
     signal?.removeEventListener("abort", callerListener);
     signal?.removeEventListener("abort", onCallerAbort);
   }
   if (signal?.aborted) throw signal.reason;
+  if (callbackFailed) throw callbackError;
   // Underlying providers are allowed to ignore abort. Their handlers remain attached and cannot alter finalized state.
   if (deadlineReached) for (const state of externalStates) if (state.started && !attemptsBy.has(label(state.entry))) attemptsBy.set(label(state.entry), { provider: state.entry.provider, ...(state.entry.id && { entryId: state.entry.id }), durationMs: Date.now() - state.startedAt, resultsCount: 0, status: "timeout", timeoutReason: "aggregate-deadline" });
   const nativeText = (native as NativeDetails & { text?: string }).text;
