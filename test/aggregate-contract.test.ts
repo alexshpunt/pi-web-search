@@ -83,7 +83,7 @@ function brave(items: Array<Record<string, unknown>>): Response {
 }
 
 function nativeRuntime(overrides: Partial<NativeSource> = {}): AggregateRuntime {
-  const activeModel = { provider: "openai", api: "openai-responses", id: "gpt-5" };
+  const activeModel = { provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5" };
   return {
     activeModel,
     roundRobinCursor: 0,
@@ -91,7 +91,7 @@ function nativeRuntime(overrides: Partial<NativeSource> = {}): AggregateRuntime 
     nativeSource: {
       isEligible: () => true,
       search: async () => ({
-        provider: "openai",
+        provider: "openai-codex",
         model: "gpt-5",
         text: "Native evidence: https://example.com/native-shared?utm_source=model",
       }),
@@ -213,7 +213,7 @@ describe("raw native-first aggregate contract", () => {
     const runtime = nativeRuntime({
       search: async () => {
         await barrier.arrive("native");
-        return { provider: "openai", model: "gpt-5", text: nativeAnswer };
+        return { provider: "openai-codex", model: "gpt-5", text: nativeAnswer };
       },
     });
     const fetcher = vi.fn(async (input: string | URL | Request) => {
@@ -232,7 +232,7 @@ describe("raw native-first aggregate contract", () => {
     const details = await search;
     expect(started).toEqual(["native", "serper"]);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(details.native).toMatchObject({ status: "success", provider: "openai", model: "gpt-5" });
+    expect(details.native).toMatchObject({ status: "success", provider: "openai-codex", model: "gpt-5" });
     expect(details.answer).toBe(nativeAnswer);
     expect(details.attempts?.map(item => item.provider)).toEqual(["serper"]);
     expect(formatSearchText(details)).toBe([
@@ -244,7 +244,7 @@ describe("raw native-first aggregate contract", () => {
 
   it("classifies whitespace-only native prose as unusable without hiding external output", async () => {
     const runtime = nativeRuntime({
-      search: async () => ({ provider: "openai", model: "gpt-5", text: " \n\t " }),
+      search: async () => ({ provider: "openai-codex", model: "gpt-5", text: " \n\t " }),
     });
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) =>
       requestUrl(input).includes("serper")
@@ -255,7 +255,7 @@ describe("raw native-first aggregate contract", () => {
     const details = await aggregateSearch(aggregateConfig(), { query: "q", maxResults: 10 }, undefined, runtime);
 
     expect(details.answer).toBeUndefined();
-    expect(details.native).toMatchObject({ status: "empty", provider: "openai", model: "gpt-5" });
+    expect(details.native).toMatchObject({ status: "empty", provider: "openai-codex", model: "gpt-5" });
     expect(formatSearchText(details)).toBe([
       "1. External survives",
       "   https://example.com/external",
@@ -275,7 +275,7 @@ describe("raw native-first aggregate contract", () => {
 
     expect(searchNative).not.toHaveBeenCalled();
 
-    expect(isEligible).toHaveBeenCalledWith({ provider: "openai", api: "openai-responses", id: "gpt-5" });
+    expect(isEligible).toHaveBeenCalledWith({ provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5" });
     expect(details).toMatchObject({ native: { status: "ineligible" } });
   });
 
@@ -293,7 +293,7 @@ describe("raw native-first aggregate contract", () => {
 
     expect(output).toContain("External");
     expect(output).not.toContain("native private failure");
-    expect(details.native).toMatchObject({ status: "failure", provider: "openai", model: "gpt-5" });
+    expect(details.native).toMatchObject({ status: "failure", provider: "openai-codex", model: "gpt-5" });
     expect(details.native?.durationMs).toBeGreaterThanOrEqual(0);
     expect(details.native?.error?.length).toBeLessThanOrEqual(500);
   });
@@ -315,6 +315,7 @@ describe("aggregate lifecycle contract with controlled time", () => {
     const runtime = {
       activeModel: model,
       modelRegistry: {
+        getAvailable: () => [model], isUsingOAuth: () => true,
         getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const, apiKey: "codex-secret" })),
         complete,
       },
@@ -356,7 +357,7 @@ describe("aggregate lifecycle contract with controlled time", () => {
     let releaseNative!: () => void;
     const runtime = nativeRuntime({
       search: ({ signal }) => new Promise<NativeSearchResult>((resolve) => {
-        releaseNative = () => resolve({ text: "late", provider: "openai", model: "gpt-5" });
+        releaseNative = () => resolve({ text: "late", provider: "openai-codex", model: "gpt-5" });
         signal.addEventListener("abort", () => { nativeAborted = true; releaseNative(); }, { once: true });
       }),
     });
@@ -443,7 +444,7 @@ describe("aggregate lifecycle contract with controlled time", () => {
       search: ({ signal }) => new Promise<NativeSearchResult>((resolve) => {
         const release = () => resolve({
           text: "native private late result",
-          provider: "openai",
+          provider: "openai-codex",
           model: "gpt-5",
         });
         releases.push(release);
@@ -480,7 +481,7 @@ describe("aggregate lifecycle contract with controlled time", () => {
     expect(details).toMatchObject({
       native: {
         status: "timeout",
-        provider: "openai",
+        provider: "openai-codex",
         model: "gpt-5",
         timeoutReason: "aggregate-deadline",
       },
@@ -534,9 +535,10 @@ describe("aggregate deadline against abort-ignoring work", () => {
   it("settles at the aggregate deadline and never aborts the caller signal", async () => {
     vi.useFakeTimers();
     const caller = new AbortController();
+    const model = { provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.3-codex", baseUrl: "https://chatgpt.com/backend-api" };
     const runtime = {
-      activeModel: { provider: "openrouter", api: "openai-completions", id: "openai/gpt-5.6", baseUrl: "https://openrouter.ai/api/v1" },
-      modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, headers: { Authorization: "Bearer test" } }) },
+      activeModel: model,
+      modelRegistry: { getAvailable: () => [model], isUsingOAuth: () => true, getApiKeyAndHeaders: async () => ({ ok: true, headers: { Authorization: "Bearer test" } }) },
     };
     vi.stubGlobal("fetch", vi.fn(async () => new Promise<Response>(() => undefined)));
     const search = aggregateSearch(aggregateConfig({ aggregateDeadlineMs: 1_000, sourceTimeoutMs: 60_000 }), { query: "q", maxResults: 10 }, caller.signal, runtime as never);
