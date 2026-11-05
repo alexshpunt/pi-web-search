@@ -22,30 +22,25 @@ The call shape is:
 
 `query` must be a non-empty string. `limit` is optional and must be an integer from 1 to 20. It controls only the appended external result list; it never truncates native model text. Text beginning with `web:` is ordinary query text.
 
-Eligible external providers are tried in configuration order until one returns usable results. Every query starts with the first eligible provider. In parallel, native search uses an available OpenAI Codex subscription with a supported model, independently of the active model. If the subscription is unavailable, only external search runs. The final text contains the usable parts only:
+Eligible external providers are tried in configuration order until one returns usable results. Every query starts with the first eligible provider. In parallel, native search uses an available OpenAI Codex subscription with a supported model, independently of the active model. If the subscription is unavailable, only external search runs. The foreground call returns the first usable source without waiting for the other. The remaining source's result or failure is delivered later, linked to the original query and call. Native results contain unchanged model prose; external results contain a canonicalized, deduplicated numbered list. Public text has no headings or provider/model metadata. Native search is asked for its best immediate, self-contained answer, with useful citations when available and without follow-up questions, requests for more information, process commentary, or conversational filler. Native text is not parsed or ranked as external result items, and an external URL cited by native prose remains in the external list.
 
-1. unchanged native model prose first, when native search returns usable text;
-2. one blank line, then a canonicalized and deduplicated numbered list from the successful external provider, when external results are usable.
-
-Either part may appear alone. Public text has no headings or provider/model metadata. Native search is asked for its best immediate, self-contained answer, with useful citations when available and without follow-up questions, requests for more information, process commentary, or conversational filler. Native text is not parsed or ranked as external result items, and an external URL cited by native prose remains in the external list.
-
-Each external snippet is rendered on one line as `Excerpt: “<text>”`. Markdown and HTML structure is removed, whitespace is collapsed, and unsafe terminal and bidirectional presentation controls are neutralized in snippets, titles, displayed URLs, and source labels. The package does not summarize or truncate snippets and does not add ellipses; ellipses already present in provider text remain. Structured details keep the original canonical result data, aggregate timing, limits, migration warnings, each external attempt, native identity and status, bounded failure details, timeout reasons, results, and truncation state.
+Each external snippet is rendered on one line as `Excerpt: “<text>”`. Markdown and HTML structure is removed, whitespace is collapsed, and unsafe terminal and bidirectional presentation controls are neutralized in snippets, titles, displayed URLs, and source labels. The package does not summarize or truncate snippets and does not add ellipses; ellipses already present in provider text remain. Each source result includes its own structured data and diagnostics, including timing and limits, migration warnings, external attempts or native identity and status, bounded failure details, timeout reasons, results, and truncation state as applicable.
 
 ## Background searches
 
-`web_search` blocks by default. Add `"background": true` to return a launch receipt immediately:
+`web_search` waits for the first usable source by default. Add `"background": true` to return a launch receipt immediately:
 
 ```json
 { "query": "Pi extension lifecycle", "limit": 5, "background": true }
 ```
 
-The receipt contains `requestId`, `query`, and `status: "running"`. It is not search evidence. Launch several independent queries and continue unrelated work. Each query delivers one complete aggregate result or failure, in completion order. Active runs receive it at the next safe turn boundary; an idle agent wakes automatically. An in-flight model request is not rewritten.
+The receipt contains `requestId`, `query`, and `status: "running"`. It is not search evidence. Launch several independent queries and continue unrelated work. Each eligible source delivers its result or failure as it finishes. Active runs receive it at the next safe turn boundary; an idle agent wakes automatically. An in-flight model request is not rewritten.
 
 The agent receives the full answer, canonical pages and snippets, source attempts, timing, and redacted diagnostics. The user sees a compact card with the query, status, duration, result count, and source domains. Expand the card for the answer and pages; collapsing it never removes information from agent context.
 
 In Stereo fullscreen, each delayed card appears in Activity beside the call that launched it, not in Conversation. Searches launched inside Codemode or another tool stay with their real visible outer call. Calls keep their own cards even when searches finish out of order. Late card text remains searchable, and saved history keeps its chronological order.
 
-When no independent work remains, call `wait_for_web_searches` with `{}`. It waits for the searches outstanding when the call starts and returns their full results. Wait shows only a short consumption confirmation; the full cards remain at their original calls. Results already delivered automatically are not repeated. A later wait returns an empty `results` list once everything has been delivered. Searches launched after a wait starts belong to a later delivery.
+When no independent work remains, call `wait_for_web_searches` with `{}`. It waits for the next available batch from searches outstanding when the call starts and returns those source results; other sources may still be running. Wait shows only a short consumption confirmation; the full cards remain at their original calls. Results already delivered automatically are not repeated. A later wait returns an empty `results` list once everything has been delivered. Searches launched after a wait starts belong to a later delivery.
 
 Stopping the agent cancels outstanding searches. Reloading Pi, switching sessions, or navigating to another session branch interrupts them without restarting them or delivering old results into the new history. Jobs are not persisted across reloads.
 
@@ -59,9 +54,9 @@ External results retain provider order after deduplication. Canonicalization rem
 
 Native search uses the OpenAI Codex subscription when OAuth authentication and a supported model are available. Pi's available Codex models are checked against the subscription's current capability metadata. There is no native search through the active model or other providers. External providers may incur their own charges.
 
-The default per-source timeout is 30 seconds. For native search, that single timeout covers capability acquisition and completion together. The default aggregate deadline is 45 seconds and cancels unfinished capability, native, and external work. Caller cancellation takes precedence over partial results and aborts every child operation.
+The default per-source timeout is 90 seconds. For native search, that single timeout covers capability acquisition and completion together. The default aggregate deadline is 90 seconds and cancels unfinished capability, native, and external work. Caller cancellation takes precedence over partial results and aborts every child operation.
 
-A usable native answer or external result list makes the aggregate operationally successful even when another source fails or times out. Partial failures stay out of normal successful text and remain in structured diagnostics. Empty or whitespace-only source output is omitted. If neither side is usable, including when no source is eligible or all sources return empty, the caller receives exactly `Web search failed: all eligible sources failed or timed out. All configured search providers failed.`
+A usable native answer or external result list is returned even when another source fails or times out. The other source's failure is delivered separately with structured diagnostics. Empty or whitespace-only source output is omitted. If neither side is usable, including when no source is eligible or all sources return empty, the caller receives exactly `Web search failed: all eligible sources failed or timed out. All configured search providers failed.`
 
 Provider HTTP errors include the status and bounded, redacted detail. A custom external-provider `baseUrl` must use public HTTPS, contain no credentials, and not target localhost or a private address.
 
