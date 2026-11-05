@@ -90,7 +90,7 @@ function rankItems(groups: Array<{ entry: SearchProviderEntry; items: SearchResu
   return { results: results.slice(0, limit), truncated: results.length > limit };
 }
 
-type NativeRuntime = { activeModel: any; nativeSource?: { isEligible(model: any): boolean; search(input: { query: string; model: any; signal: AbortSignal }): Promise<{ text: string; provider: string; model: string }> }; modelRegistry?: any };
+type NativeRuntime = { activeModel?: any; nativeSource?: { isEligible(model: any): boolean; search(input: { query: string; model: any; signal: AbortSignal }): Promise<{ text: string; provider: string; model: string }> }; modelRegistry?: any };
 type RaceResult<T> = { value?: T; timedOut: boolean; error?: unknown };
 function raceWithTimeout<T>(promise: Promise<T>, ms: number, controller: AbortController): Promise<RaceResult<T>> {
   return new Promise((resolve) => {
@@ -141,7 +141,7 @@ export async function performSearch(config: WebsearchConfig, request: SearchRequ
   })();
 
   let native: NativeDetails = { status: "ineligible" };
-  let nativeModel = runtime?.activeModel;
+  let nativeModel = runtime?.nativeSource ? runtime.activeModel : undefined;
   const nativeState = { settled: false };
   const nativeTask = (async () => {
     if (!runtime || (!nativeModel && !runtime.modelRegistry)) return;
