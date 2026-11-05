@@ -22,7 +22,7 @@ The call shape is:
 
 `query` must be a non-empty string. `limit` is optional and must be an integer from 1 to 20. It controls only the appended external result list; it never truncates native model text. Text beginning with `web:` is ordinary query text.
 
-Eligible external providers are tried in configuration order until one returns usable results. Every query starts with the first eligible provider. In parallel, native search uses an available OpenAI Codex subscription with a supported model; otherwise it uses the active model if supported. The final text contains the usable parts only:
+Eligible external providers are tried in configuration order until one returns usable results. Every query starts with the first eligible provider. In parallel, native search uses an available OpenAI Codex subscription with a supported model, independently of the active model. If the subscription is unavailable, only external search runs. The final text contains the usable parts only:
 
 1. unchanged native model prose first, when native search returns usable text;
 2. one blank line, then a canonicalized and deduplicated numbered list from the successful external provider, when external results are usable.
@@ -57,18 +57,7 @@ Supported external providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Pa
 
 External results retain provider order after deduplication. Canonicalization removes fragments, one empty trailing slash from non-root paths, and the known tracking parameters `utm_*`, `gclid`, `fbclid`, `dclid`, `msclkid`, `mc_cid`, and `mc_eid`. Root URLs, meaningful repeated slashes, and other query parameters are preserved. Only HTTP and HTTPS results are returned.
 
-Native search is automatic and may add provider and model charges. There is no per-call cost budget or native enable switch. The configured external-provider set is the external cost control. Current native eligibility is fail-closed:
-
-- OpenAI Responses supports `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.5-2026-04-23`, `gpt-5.5-pro-2026-04-23`, `gpt-5.4`, `gpt-5.4-pro`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.4-2026-03-05`, `gpt-5.4-pro-2026-03-05`, `gpt-5.4-mini-2026-03-17`, `gpt-5.4-nano-2026-03-17`, `gpt-4.1`, `gpt-4.1-mini`, and `o4-mini`.
-- Gemini Google Search supports `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-flash-preview`, `gemini-3-pro-image`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.6-flash`, and `gemini-3.7-flash`.
-- DeepSeek Responses supports `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp` through the documented Responses path.
-- Xiaomi MiMo supports `mimo-v2.5` and `mimo-v2.5-pro` through Chat Completions.
-- Direct Anthropic Messages and direct xAI Responses are eligible by provider/API. Provider or model rejection is reported as a native-source failure.
-- Codex is eligible only when its runtime catalog has one exact model record with `supports_search_tool: true`. An available OAuth subscription takes precedence over the active model; the first supported available Codex model is selected.
-- OpenRouter is eligible only when exact active-model endpoint metadata has an array-valued `supported_parameters` containing `tools`.
-- OpenCode Go and Zen gateways are not native-search eligible. An upstream model name or OpenAI-compatible request shape is not treated as proof of hosted search support.
-
-Provider capability and model availability change. The package fails closed when static IDs or dynamic metadata do not prove support.
+Native search uses the OpenAI Codex subscription when OAuth authentication and a supported model are available. Pi's available Codex models are checked against the subscription's current capability metadata. There is no native search through the active model or other providers. External providers may incur their own charges.
 
 The default per-source timeout is 30 seconds. For native search, that single timeout covers capability acquisition and completion together. The default aggregate deadline is 45 seconds and cancels unfinished capability, native, and external work. Caller cancellation takes precedence over partial results and aborts every child operation.
 
