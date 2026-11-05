@@ -22,10 +22,10 @@ The call shape is:
 
 `query` must be a non-empty string. `limit` is optional and must be an integer from 1 to 20. It controls only the appended external result list; it never truncates native model text. Text beginning with `web:` is ordinary query text.
 
-Every ready configured external provider starts concurrently. Native capability lookup also starts without delaying external work. If the active Pi model has a supported native path, its native search joins the same aggregate. The final text contains the usable parts only:
+Eligible external providers are tried in configuration order until one returns usable results. Every query starts with the first eligible provider. In parallel, native search uses an available OpenAI Codex subscription with a supported model, independently of the active model. If the subscription is unavailable, only external search runs. The final text contains the usable parts only:
 
 1. unchanged native model prose first, when native search returns usable text;
-2. one blank line, then a globally ranked, canonicalized, and deduplicated numbered list from external providers, when external results are usable.
+2. one blank line, then a canonicalized and deduplicated numbered list from the successful external provider, when external results are usable.
 
 Either part may appear alone. Public text has no headings or provider/model metadata. Native search is asked for its best immediate, self-contained answer, with useful citations when available and without follow-up questions, requests for more information, process commentary, or conversational filler. Native text is not parsed or ranked as external result items, and an external URL cited by native prose remains in the external list.
 
@@ -53,22 +53,11 @@ Cancellation from Stop or a failed model turn saves one passive `web-search:canc
 
 ## Providers and aggregation
 
-Supported external providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Parallel, Google CSE, Z.AI, OpenAI, Codex, Anthropic, Perplexity, xAI, and Kimi. Every enabled provider with valid settings and available credentials runs. DuckDuckGo HTML remains the zero-configuration default.
+Supported external providers are Exa, Tavily, Brave, DuckDuckGo HTML, Serper, Parallel, Google CSE, Z.AI, OpenAI, Codex, Anthropic, Perplexity, xAI, and Kimi. Enabled entries with available credentials are tried in order. Errors, empty results, and source timeouts advance to the next entry while time remains. At most one external provider returns results. DuckDuckGo HTML remains the zero-configuration default.
 
-External results rank by the number of distinct sources that found the canonical page, then normalized position, optional provider scores when comparable, and canonical URL. Canonicalization removes fragments, one empty trailing slash from non-root paths, and the known tracking parameters `utm_*`, `gclid`, `fbclid`, `dclid`, `msclkid`, `mc_cid`, and `mc_eid`. Root URLs, meaningful repeated slashes, and other query parameters are preserved. Only HTTP and HTTPS results are returned.
+External results retain provider order after deduplication. Canonicalization removes fragments, one empty trailing slash from non-root paths, and the known tracking parameters `utm_*`, `gclid`, `fbclid`, `dclid`, `msclkid`, `mc_cid`, and `mc_eid`. Root URLs, meaningful repeated slashes, and other query parameters are preserved. Only HTTP and HTTPS results are returned.
 
-Native search is automatic and may add provider and model charges. There is no per-call cost budget or native enable switch. The configured external-provider set is the external cost control. Current native eligibility is fail-closed:
-
-- OpenAI Responses supports `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.5-2026-04-23`, `gpt-5.5-pro-2026-04-23`, `gpt-5.4`, `gpt-5.4-pro`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.4-2026-03-05`, `gpt-5.4-pro-2026-03-05`, `gpt-5.4-mini-2026-03-17`, `gpt-5.4-nano-2026-03-17`, `gpt-4.1`, `gpt-4.1-mini`, and `o4-mini`.
-- Gemini Google Search supports `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-flash-preview`, `gemini-3-pro-image`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.6-flash`, and `gemini-3.7-flash`.
-- DeepSeek Responses supports `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp` through the documented Responses path.
-- Xiaomi MiMo supports `mimo-v2.5` and `mimo-v2.5-pro` through Chat Completions.
-- Direct Anthropic Messages and direct xAI Responses are eligible by provider/API. Provider or model rejection is reported as a native-source failure.
-- Codex is eligible only when its runtime catalog has one exact active-model record with `supports_search_tool: true`.
-- OpenRouter is eligible only when exact active-model endpoint metadata has an array-valued `supported_parameters` containing `tools`.
-- OpenCode Go and Zen gateways are not native-search eligible. An upstream model name or OpenAI-compatible request shape is not treated as proof of hosted search support.
-
-Provider capability and model availability change. The package fails closed when static IDs or dynamic metadata do not prove support and never substitutes another model.
+Native search uses the OpenAI Codex subscription when OAuth authentication and a supported model are available. Pi's available Codex models are checked against the subscription's current capability metadata. There is no native search through the active model or other providers. External providers may incur their own charges.
 
 The default per-source timeout is 30 seconds. For native search, that single timeout covers capability acquisition and completion together. The default aggregate deadline is 45 seconds and cancels unfinished capability, native, and external work. Caller cancellation takes precedence over partial results and aborts every child operation.
 
@@ -109,7 +98,7 @@ Or it can define several external providers:
 }
 ```
 
-Use `{ "providers": [] }` to run native search only. It succeeds only when the active model is eligible and returns usable text; otherwise the tool returns the same detailed total-failure text. Set `enabled` to `false` on an external entry to exclude it.
+Use `{ "providers": [] }` to run native search only. It succeeds only when the selected native model is eligible and returns usable text; otherwise the tool returns the same detailed total-failure text. Set `enabled` to `false` on an external entry to exclude it.
 
 Top-level keys are `maxResults` (1–20), positive finite `sourceTimeoutMs`, positive finite `aggregateDeadlineMs`, and either `providers` or the fields for one provider. Provider fields are:
 
