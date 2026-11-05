@@ -59,7 +59,7 @@ export default async function registerWebSearch(pi: ExtensionAPI): Promise<void>
       signal?.throwIfAborted();
       const config = loaded.config;
       const maxResults = parameters.limit ?? config.maxResults ?? 10;
-      const runtime = { activeModel: context.model, modelRegistry: context.modelRegistry };
+      const runtime = { modelRegistry: context.modelRegistry };
       const search = (ownedSignal?: AbortSignal) => performSearch(config, { query: parameters.query, maxResults }, ownedSignal, runtime);
       if (parameters.background) {
         const receipt = background.start(toolCallId, parameters.query, search, context);
