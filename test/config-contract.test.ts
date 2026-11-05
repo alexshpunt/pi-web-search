@@ -163,10 +163,23 @@ describe("aggregate configuration contract", () => {
       ok: true,
       config: {
         maxResults: 10,
-        sourceTimeoutMs: 30_000,
-        aggregateDeadlineMs: 45_000,
+        sourceTimeoutMs: 90_000,
+        aggregateDeadlineMs: 90_000,
         providers: [{ provider: "duckduckgo-html" }],
       },
+    });
+  });
+
+  it("applies 90-second defaults to a configured provider", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-websearch-timeout-default-"));
+    directories.push(root);
+    const cwd = path.join(root, "project");
+    await mkdir(path.join(cwd, ".pi"), { recursive: true });
+    await writeFile(path.join(cwd, ".pi", "websearch.json"), JSON.stringify({ providers: [{ provider: "duckduckgo-html" }] }));
+
+    expect(await loadWebsearchConfig({ cwd, agentDirectory: path.join(root, "agent"), env: {} })).toMatchObject({
+      ok: true,
+      config: { sourceTimeoutMs: 90_000, aggregateDeadlineMs: 90_000 },
     });
   });
 

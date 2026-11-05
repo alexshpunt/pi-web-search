@@ -9,8 +9,8 @@ const CONTEXT_SIZES: readonly SearchContextSize[] = ["low","medium","high"];
 const CODEX_MODES: readonly CodexSearchMode[] = ["cached","live"];
 const STRATEGIES: readonly RoutingStrategy[] = ["priority","round-robin","fill-first"];
 export const DEFAULT_MAX_RESULTS = 10;
-export const DEFAULT_SOURCE_TIMEOUT_MS = 30_000;
-export const DEFAULT_AGGREGATE_DEADLINE_MS = 45_000;
+export const DEFAULT_SOURCE_TIMEOUT_MS = 90_000;
+export const DEFAULT_AGGREGATE_DEADLINE_MS = 90_000;
 const DEFAULT_FREE_CONFIG: WebsearchConfig = { strategy: "priority", fallback: true, providers: [{ id: "default", provider: "duckduckgo-html", maxResults: DEFAULT_MAX_RESULTS }], maxResults: DEFAULT_MAX_RESULTS, sourceTimeoutMs: DEFAULT_SOURCE_TIMEOUT_MS, aggregateDeadlineMs: DEFAULT_AGGREGATE_DEADLINE_MS };
 
 export interface ConfigLoadOptions { cwd: string; agentDirectory?: string; env?: NodeJS.ProcessEnv; }
