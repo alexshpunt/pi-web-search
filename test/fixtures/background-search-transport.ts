@@ -28,6 +28,7 @@ export default function backgroundSearchTransport(pi: ExtensionAPI): void {
       : new Response(html, { headers: { "content-type": "text/html" } }));
   };
   (globalThis as Record<symbol, unknown>)[transportKey] = (input: string | URL, init?: RequestInit) => {
+    if (new URL(String(input)).pathname === "/backend-api/codex/models") return Promise.resolve(Response.json({ models: [] }));
     const query = new URL(String(input)).searchParams.get("q")!;
     report.started.push(query);
     persist();

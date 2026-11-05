@@ -81,6 +81,7 @@ async function captureTool(): Promise<CapturedTool> {
   await registerWebSearch({
     on: vi.fn(),
     registerMessageRenderer: vi.fn(),
+    registerEntryRenderer: vi.fn(),
     registerTool: (tool: CapturedTool & { name: string }) => { if (tool.name === "web_search") captured = tool; },
     registerCommand: vi.fn(),
   } as unknown as Parameters<typeof registerWebSearch>[0]);
@@ -122,27 +123,39 @@ afterEach(async () => {
 });
 
 describe("real tool/coordinator native capability acquisition", () => {
-  it("succeeds with an explicitly empty providers array when the active model is native-search eligible", async () => {
+  it.each([
+    { provider: "openai", api: "openai-responses", id: "gpt-5.4", baseUrl: "https://api.openai.com/v1" },
+    { provider: "anthropic", api: "anthropic-messages", id: "claude", baseUrl: "https://api.anthropic.com" },
+    codexModel,
+  ])("does not search with active $provider without a Codex subscription", async (model) => {
     const cwd = await workspace({ providers: [] });
     const tool = await captureTool();
-    const model: ActiveModel = {
-      provider: "openai",
-      api: "openai-responses",
-      id: "gpt-5.4",
-      baseUrl: "https://api.openai.com/v1",
-    };
-    const complete = vi.fn(async (activeModel: ActiveModel) => assistant(`Native-only evidence from ${activeModel.id}`, activeModel));
+    const complete = vi.fn(async (activeModel: ActiveModel) => assistant("Unexpected native answer", activeModel));
+    const metadataFetch = vi.fn(async () => Response.json({ models: [{ slug: codexModel.id, supports_search_tool: true }] }));
+    (globalThis as Record<symbol, unknown>)[runtimeTransportSymbol] = metadataFetch;
     const result = await tool.execute("call", { query: "q" }, new AbortController().signal, vi.fn(), {
-      cwd,
-      model,
-      modelRegistry: { complete } as unknown as ModelRegistry,
+      cwd, model,
+      modelRegistry: { complete, getAvailable: () => [codexModel], isUsingOAuth: () => false, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "not-oauth" }) } as unknown as ModelRegistry,
     });
-
-    expect(complete).toHaveBeenCalledOnce();
-    expect(result.details).toMatchObject({ native: { status: "success", provider: "openai", model: "gpt-5.4" }, results: [] });
-    expect(result.content[0]?.text).toBe("Native-only evidence from gpt-5.4");
+    expect(complete).not.toHaveBeenCalled();
+    expect(metadataFetch).not.toHaveBeenCalled();
+    expect(result.details).toMatchObject({ native: { status: "ineligible" }, results: [], attempts: [] });
   });
 
+  it("returns external results without invoking the active model when there is no subscription", async () => {
+    const cwd = await workspace();
+    const tool = await captureTool();
+    const complete = vi.fn();
+    const transport = vi.fn(async () => Response.json({ organic: [{ title: "External", link: "https://example.com/external" }] }));
+    (globalThis as Record<symbol, unknown>)[runtimeTransportSymbol] = transport;
+    const model = { provider: "openai", api: "openai-responses", id: "gpt-5.4", baseUrl: "https://api.openai.com/v1" };
+    const result = await tool.execute("call", { query: "q" }, new AbortController().signal, vi.fn(), {
+      cwd, model, modelRegistry: { complete, getAvailable: () => [], isUsingOAuth: () => false } as unknown as ModelRegistry,
+    });
+    expect(complete).not.toHaveBeenCalled();
+    expect(transport).toHaveBeenCalledOnce();
+    expect(result.details).toMatchObject({ native: { status: "ineligible" }, results: [{ title: "External" }] });
+  });
   it("returns the detailed no-usable-output result with empty providers and an ineligible active model", async () => {
     const cwd = await workspace({ providers: [] });
     const tool = await captureTool();
@@ -163,13 +176,13 @@ describe("real tool/coordinator native capability acquisition", () => {
       "Web search failed: all eligible sources failed or timed out. All configured search providers failed.",
     );
     expect(result.details).toMatchObject({
-      native: { status: "ineligible", provider: "opencode-go", model: "opencode-go-model" },
+      native: { status: "ineligible" },
       results: [],
       attempts: [],
     });
   });
 
-  it("acquires the exact active Codex model before its adapter joins the concurrent aggregate", async () => {
+  it("uses the subscription model with another active model while the external search runs", async () => {
     const cwd = await workspace();
     const tool = await captureTool();
     const signal = new AbortController().signal;
@@ -182,7 +195,7 @@ describe("real tool/coordinator native capability acquisition", () => {
       await barrier.arrive("native");
       return assistant(`Codex evidence from ${model.id}`);
     });
-    const modelRegistry = { getApiKeyAndHeaders, complete } as unknown as ModelRegistry;
+    const modelRegistry = { getAvailable: () => [codexModel], isUsingOAuth: () => true, getApiKeyAndHeaders, complete } as unknown as ModelRegistry;
     const metadataCalls: Array<{ input: string; init?: RequestInit }> = [];
     const injectedTransport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -210,7 +223,7 @@ describe("real tool/coordinator native capability acquisition", () => {
 
     const result = await tool.execute("call", { query: "q" }, signal, vi.fn(), {
       cwd,
-      model: codexModel,
+      model: openRouterModel,
       modelRegistry,
     });
 
@@ -236,57 +249,6 @@ describe("real tool/coordinator native capability acquisition", () => {
     expect(result.details.native).toMatchObject({ status: "success" });
   });
 
-  it("acquires the exact active OpenRouter model through the same tool path", async () => {
-    const cwd = await workspace();
-    const tool = await captureTool();
-    const signal = new AbortController().signal;
-    const getApiKeyAndHeaders = vi.fn(async () => ({ ok: true as const, apiKey: "router-secret" }));
-    let completionOptions: Record<string, unknown> | undefined;
-    const complete = vi.fn(async (model: ActiveModel, _context: unknown, options?: Record<string, unknown>) => {
-      completionOptions = options;
-      return assistant("OpenRouter native evidence", model);
-    });
-    const modelRegistry = { getApiKeyAndHeaders, complete } as unknown as ModelRegistry;
-    const injectedTransport = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/models/openai/gpt-5.6/endpoints")) {
-        expect(init?.signal).toBeDefined();
-        expect(init?.signal).not.toBe(signal);
-        return new Response(JSON.stringify({
-          data: { id: openRouterModel.id, endpoints: [{ model_id: openRouterModel.id, supported_parameters: ["tools"] }] },
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (url.startsWith("https://google.serper.dev/")) {
-        return new Response(JSON.stringify({ organic: [{ title: "External success", link: "https://example.com/external" }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected transport URL: ${url}`);
-    });
-    const globalFetch = vi.fn(() => { throw new Error("registered tool bypassed runtime transport seam"); });
-    vi.stubGlobal("fetch", globalFetch);
-    (globalThis as Record<symbol, unknown>)[runtimeTransportSymbol] = injectedTransport;
-
-    const result = await tool.execute("call", { query: "q" }, signal, vi.fn(), {
-      cwd,
-      model: openRouterModel,
-      modelRegistry,
-    });
-
-    expect(getApiKeyAndHeaders).toHaveBeenCalledWith(openRouterModel);
-    expect(complete.mock.calls[0]?.[0]).toBe(openRouterModel);
-    expect(completionOptions).toMatchObject({ onPayload: expect.any(Function) });
-    expect(completionOptions?.fetch).toBe(injectedTransport);
-    expect(injectedTransport.mock.calls.map(([input]) => String(input))).toEqual(expect.arrayContaining([
-      "https://openrouter.ai/api/v1/models/openai/gpt-5.6/endpoints",
-      expect.stringMatching(/^https:\/\/google\.serper\.dev\//),
-    ]));
-    expect(globalFetch).not.toHaveBeenCalled();
-    expect(result.content[0]?.text).toContain("OpenRouter native evidence");
-    expect(result.content[0]?.text).toContain("External success");
-  });
-
 
   it("starts external work before metadata resolves, then joins native completion to the outstanding aggregate", async () => {
     const cwd = await workspace();
@@ -303,6 +265,7 @@ describe("real tool/coordinator native capability acquisition", () => {
       return native.promise;
     });
     const modelRegistry = {
+      getAvailable: () => [codexModel], isUsingOAuth: () => true,
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const, apiKey: "codex-secret" })),
       complete,
     } as unknown as ModelRegistry;
@@ -370,6 +333,7 @@ describe("real tool/coordinator native capability acquisition", () => {
       });
     });
     const modelRegistry = {
+      getAvailable: () => [codexModel], isUsingOAuth: () => true,
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const, apiKey: "codex-secret" })),
       complete,
     } as unknown as ModelRegistry;
@@ -428,6 +392,7 @@ describe("real tool/coordinator native capability acquisition", () => {
     const externalStarted = deferred<void>();
     const complete = vi.fn();
     const modelRegistry = {
+      getAvailable: () => [codexModel], isUsingOAuth: () => true,
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const, apiKey: "codex-secret" })),
       complete,
     } as unknown as ModelRegistry;
@@ -473,6 +438,7 @@ describe("real tool/coordinator native capability acquisition", () => {
     const signal = new AbortController().signal;
     const complete = vi.fn();
     const modelRegistry = {
+      getAvailable: () => [codexModel], isUsingOAuth: () => true,
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const, apiKey: "codex-secret" })),
       complete,
     } as unknown as ModelRegistry;
